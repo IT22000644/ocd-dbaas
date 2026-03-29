@@ -5,7 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"hash/fnv"
+	"sync"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -43,10 +47,9 @@ var (
 	smGVR = schema.GroupVersionResource{
 		Group: "monitoring.coreos.com", Version: "v1", Resource: "servicemonitors",
 	}
-	cmGVR = schema.GroupVersionResource{
-		Group: "", Version: "v1", Resource: "configmaps",
-	}
 )
+
+const vmiPhaseRunning = "Running"
 
 // Client wraps the Kubernetes dynamic client for Harvester API calls.
 type Client struct {
@@ -77,53 +80,68 @@ type VMCreateParams struct {
 	S3Config       *dbaasv1.S3BackupConfig
 }
 
+// VMIReadiness bundles phase, IP, and postgres-readiness from a single VMI fetch.
+type VMIReadiness struct {
+	Running bool
+	IP      string
+	Ready   bool // Running AND uptime > 3 min
+}
+
 // ============================================================
 // Network: Kube-OVN VPC + Subnet + NAD
 // ============================================================
 
-func (c *Client) CreateVPCNetwork(ctx context.Context, id, ns, consumerVLAN string, port int) (vpcName, subnetName, nadName string, err error) {
+func (c *Client) CreateVPCNetwork(ctx context.Context, id, ns, consumerVLAN string) (vpcName, subnetName, nadName string, err error) {
 	vpcName = fmt.Sprintf("dbaas-%s-vpc", id)
 	subnetName = fmt.Sprintf("dbaas-%s-subnet", id)
 	nadName = fmt.Sprintf("dbaas-%s-nad", id)
-	subnetCIDR := fmt.Sprintf("10.100.%d.0/24", hashByte(id))
+	cidr, gw := subnetCIDRForID(id)
 
 	// 1. Create VPC
 	vpc := newUnstructured("kubeovn.io/v1", "Vpc", vpcName, "")
 	_ = unstructured.SetNestedSlice(vpc.Object, []interface{}{ns}, "spec", "namespaces")
-	if _, err = c.Dynamic.Resource(vpcGVR).Create(ctx, vpc, metav1.CreateOptions{}); err != nil {
-		return
+	created, e := c.Dynamic.Resource(vpcGVR).Create(ctx, vpc, metav1.CreateOptions{})
+	if e != nil {
+		if !apierrors.IsAlreadyExists(e) {
+			err = e
+			return
+		}
+		created, _ = c.Dynamic.Resource(vpcGVR).Get(ctx, vpcName, metav1.GetOptions{})
 	}
 
 	// 2. Create Subnet
 	subnet := newUnstructured("kubeovn.io/v1", "Subnet", subnetName, "")
 	_ = unstructured.SetNestedField(subnet.Object, vpcName, "spec", "vpc")
-	_ = unstructured.SetNestedField(subnet.Object, subnetCIDR, "spec", "cidrBlock")
-	_ = unstructured.SetNestedField(subnet.Object, fmt.Sprintf("10.100.%d.1", hashByte(id)), "spec", "gateway")
+	_ = unstructured.SetNestedField(subnet.Object, cidr, "spec", "cidrBlock")
+	_ = unstructured.SetNestedField(subnet.Object, gw, "spec", "gateway")
 	_ = unstructured.SetNestedField(subnet.Object, "IPv4", "spec", "protocol")
 	_ = unstructured.SetNestedSlice(subnet.Object, []interface{}{ns}, "spec", "namespaces")
 	_ = unstructured.SetNestedField(subnet.Object, true, "spec", "private")
 	_ = unstructured.SetNestedSlice(subnet.Object, []interface{}{consumerVLAN}, "spec", "allowSubnets")
-	if _, err = c.Dynamic.Resource(subnetGVR).Create(ctx, subnet, metav1.CreateOptions{}); err != nil {
-		return
+	if _, e := c.Dynamic.Resource(subnetGVR).Create(ctx, subnet, metav1.CreateOptions{}); e != nil {
+		if err = ignoreAlreadyExists(e); err != nil {
+			return
+		}
 	}
 
 	// 3. Create NAD
 	nad := newUnstructured("k8s.cni.cncf.io/v1", "NetworkAttachmentDefinition", nadName, ns)
 	config := fmt.Sprintf(`{"cniVersion":"0.3.1","type":"kube-ovn","server_socket":"/run/openvswitch/kube-ovn-daemon.sock","provider":"%s.%s.ovn"}`, nadName, ns)
 	_ = unstructured.SetNestedField(nad.Object, config, "spec", "config")
-	if _, err = c.Dynamic.Resource(nadGVR).Namespace(ns).Create(ctx, nad, metav1.CreateOptions{}); err != nil {
-		return
+	if _, e := c.Dynamic.Resource(nadGVR).Namespace(ns).Create(ctx, nad, metav1.CreateOptions{}); e != nil {
+		if err = ignoreAlreadyExists(e); err != nil {
+			return
+		}
 	}
 
 	// 4. Add static route for consumer VLAN access
-	vpcObj, getErr := c.Dynamic.Resource(vpcGVR).Get(ctx, vpcName, metav1.GetOptions{})
-	if getErr == nil {
-		routes, _, _ := unstructured.NestedSlice(vpcObj.Object, "spec", "staticRoutes")
+	if created != nil {
+		routes, _, _ := unstructured.NestedSlice(created.Object, "spec", "staticRoutes")
 		routes = append(routes, map[string]interface{}{
 			"cidr": consumerVLAN, "nextHop": "autodetect", "policy": "policyDst",
 		})
-		_ = unstructured.SetNestedSlice(vpcObj.Object, routes, "spec", "staticRoutes")
-		_, _ = c.Dynamic.Resource(vpcGVR).Update(ctx, vpcObj, metav1.UpdateOptions{})
+		_ = unstructured.SetNestedSlice(created.Object, routes, "spec", "staticRoutes")
+		_, _ = c.Dynamic.Resource(vpcGVR).Update(ctx, created, metav1.UpdateOptions{})
 	}
 
 	return
@@ -136,7 +154,7 @@ func (c *Client) CreateVPCNetwork(ctx context.Context, id, ns, consumerVLAN stri
 func (c *Client) CreateDataVolume(ctx context.Context, id, ns string, sizeGB int, storageClass string) (string, error) {
 	dvName := fmt.Sprintf("pg-%s-data", id)
 	dv := newUnstructured("cdi.kubevirt.io/v1beta1", "DataVolume", dvName, ns)
-	dv.SetLabels(map[string]string{"dbaas.wso2.com/instance": id, "dbaas.wso2.com/role": "pgdata"})
+	dv.SetLabels(map[string]string{dbaasv1.LabelInstance: id, dbaasv1.LabelRole: "pgdata"})
 
 	_ = unstructured.SetNestedMap(dv.Object, map[string]interface{}{}, "spec", "source", "blank")
 	_ = unstructured.SetNestedStringSlice(dv.Object, []string{"ReadWriteOnce"}, "spec", "pvc", "accessModes")
@@ -172,7 +190,8 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	exporterPw := randomString(24)
 	luksKey := randomString(64)
 
-	// Store credentials in K8s Secret
+	// Store credentials and cloud-init in K8s Secret
+	cloudInit := buildCloudInit(p, adminPw, replPw, exporterPw, luksKey)
 	secret := newUnstructured("v1", "Secret", secretName, p.Namespace)
 	_ = unstructured.SetNestedField(secret.Object, "Opaque", "type")
 	_ = unstructured.SetNestedField(secret.Object, map[string]interface{}{
@@ -181,17 +200,15 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 		"repl_password":     replPw,
 		"exporter_password": exporterPw,
 		"luks_key":          luksKey,
+		"userdata":          cloudInit, // referenced by VM spec; avoids plain-text in VM CR
 	}, "stringData")
 	if _, err = c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 		return
 	}
 
-	// Build cloud-init userdata
-	cloudInit := buildCloudInit(p, adminPw, replPw, exporterPw, luksKey)
-
 	// Build VirtualMachine CR
 	vm := newUnstructured("kubevirt.io/v1", "VirtualMachine", vmName, p.Namespace)
-	vm.SetLabels(map[string]string{"dbaas.wso2.com/instance": p.ID, "dbaas.wso2.com/role": "primary"})
+	vm.SetLabels(map[string]string{dbaasv1.LabelInstance: p.ID, dbaasv1.LabelRole: "primary"})
 
 	spec := map[string]interface{}{
 		"running": true,
@@ -216,7 +233,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 		},
 		"template": map[string]interface{}{
 			"metadata": map[string]interface{}{
-				"labels": map[string]string{"dbaas.wso2.com/instance": p.ID},
+				"labels": map[string]string{dbaasv1.LabelInstance: p.ID},
 				"annotations": map[string]interface{}{
 					"ovn.kubernetes.io/logical_switch": p.SubnetName,
 				},
@@ -245,7 +262,9 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 				"volumes": []interface{}{
 					map[string]interface{}{"name": "os-disk", "dataVolume": map[string]interface{}{"name": fmt.Sprintf("pg-%s-os", p.ID)}},
 					map[string]interface{}{"name": "pgdata-disk", "dataVolume": map[string]interface{}{"name": p.DataVolumeRef}},
-					map[string]interface{}{"name": "cloudinit", "cloudInitNoCloud": map[string]interface{}{"userData": cloudInit}},
+					map[string]interface{}{"name": "cloudinit", "cloudInitNoCloud": map[string]interface{}{
+						"userDataSecretRef": map[string]interface{}{"name": secretName},
+					}},
 				},
 			},
 		},
@@ -256,15 +275,17 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	return
 }
 
-// GetVMIPAddress checks VMI status for a running IP.
-func (c *Client) GetVMIPAddress(ctx context.Context, ns, vmName string) (ip string, running bool, err error) {
+// GetVMIReadiness fetches the VMI once and returns phase, IP, and postgres-readiness.
+func (c *Client) GetVMIReadiness(ctx context.Context, ns, vmName string) (VMIReadiness, error) {
 	vmi, err := c.Dynamic.Resource(vmiGVR).Namespace(ns).Get(ctx, vmName, metav1.GetOptions{})
 	if err != nil {
-		return "", false, err
+		return VMIReadiness{}, err
 	}
-	phase, _, _ := unstructured.NestedString(vmi.Object, "status", "phase")
-	running = (phase == "Running")
 
+	phase, _, _ := unstructured.NestedString(vmi.Object, "status", "phase")
+	running := phase == vmiPhaseRunning
+
+	var ip string
 	interfaces, _, _ := unstructured.NestedSlice(vmi.Object, "status", "interfaces")
 	for _, iface := range interfaces {
 		ifMap, ok := iface.(map[string]interface{})
@@ -276,42 +297,28 @@ func (c *Client) GetVMIPAddress(ctx context.Context, ns, vmName string) (ip stri
 			break
 		}
 	}
-	return
+
+	ready := running && time.Since(vmi.GetCreationTimestamp().Time) > 3*time.Minute
+	return VMIReadiness{Running: running, IP: ip, Ready: ready}, nil
 }
 
-// CheckPostgresReady tries a pg_isready via KubeVirt exec.
-func (c *Client) CheckPostgresReady(ctx context.Context, ns, vmName string, port int) bool {
-	// In production: use the KubeVirt subresource exec API
-	// POST /apis/subresources.kubevirt.io/v1/namespaces/{ns}/virtualmachineinstances/{name}/exec
-	// For now, check if the VMI has been running for > 3 minutes (rough heuristic)
-	vmi, err := c.Dynamic.Resource(vmiGVR).Namespace(ns).Get(ctx, vmName, metav1.GetOptions{})
+// setVMRunning sets spec.running on the VM.
+func (c *Client) setVMRunning(ctx context.Context, ns, vmName string, running bool) error {
+	vm, err := c.Dynamic.Resource(vmGVR).Namespace(ns).Get(ctx, vmName, metav1.GetOptions{})
 	if err != nil {
-		return false
+		return err
 	}
-	phase, _, _ := unstructured.NestedString(vmi.Object, "status", "phase")
-	return phase == "Running"
+	_ = unstructured.SetNestedField(vm.Object, running, "spec", "running")
+	_, err = c.Dynamic.Resource(vmGVR).Namespace(ns).Update(ctx, vm, metav1.UpdateOptions{})
+	return err
 }
 
-// StopVM sets spec.running = false.
 func (c *Client) StopVM(ctx context.Context, ns, vmName string) error {
-	vm, err := c.Dynamic.Resource(vmGVR).Namespace(ns).Get(ctx, vmName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	_ = unstructured.SetNestedField(vm.Object, false, "spec", "running")
-	_, err = c.Dynamic.Resource(vmGVR).Namespace(ns).Update(ctx, vm, metav1.UpdateOptions{})
-	return err
+	return c.setVMRunning(ctx, ns, vmName, false)
 }
 
-// StartVM sets spec.running = true.
 func (c *Client) StartVM(ctx context.Context, ns, vmName string) error {
-	vm, err := c.Dynamic.Resource(vmGVR).Namespace(ns).Get(ctx, vmName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	_ = unstructured.SetNestedField(vm.Object, true, "spec", "running")
-	_, err = c.Dynamic.Resource(vmGVR).Namespace(ns).Update(ctx, vm, metav1.UpdateOptions{})
-	return err
+	return c.setVMRunning(ctx, ns, vmName, true)
 }
 
 // ResizeVM updates CPU/memory on the VM spec.
@@ -338,10 +345,10 @@ func (c *Client) DeployMonitoring(ctx context.Context, id, ns, vmAddr string, pg
 
 	// Headless service
 	svc := newUnstructured("v1", "Service", svcName, ns)
-	svc.SetLabels(map[string]string{"dbaas.wso2.com/instance": id, "dbaas.wso2.com/metrics": "true"})
+	svc.SetLabels(map[string]string{dbaasv1.LabelInstance: id, dbaasv1.LabelMetrics: "true"})
 	_ = unstructured.SetNestedField(svc.Object, "ClusterIP", "spec", "type")
 	_ = unstructured.SetNestedField(svc.Object, "None", "spec", "clusterIP")
-	_ = unstructured.SetNestedField(svc.Object, map[string]interface{}{"dbaas.wso2.com/instance": id}, "spec", "selector")
+	_ = unstructured.SetNestedField(svc.Object, map[string]interface{}{dbaasv1.LabelInstance: id}, "spec", "selector")
 	_ = unstructured.SetNestedSlice(svc.Object, []interface{}{
 		map[string]interface{}{"name": "metrics", "port": int64(9187), "targetPort": int64(9187), "protocol": "TCP"},
 	}, "spec", "ports")
@@ -349,9 +356,9 @@ func (c *Client) DeployMonitoring(ctx context.Context, id, ns, vmAddr string, pg
 
 	// ServiceMonitor
 	sm := newUnstructured("monitoring.coreos.com/v1", "ServiceMonitor", smName, ns)
-	sm.SetLabels(map[string]string{"dbaas.wso2.com/instance": id, "release": "prometheus"})
+	sm.SetLabels(map[string]string{dbaasv1.LabelInstance: id, "release": "prometheus"})
 	_ = unstructured.SetNestedField(sm.Object, map[string]interface{}{
-		"matchLabels": map[string]interface{}{"dbaas.wso2.com/metrics": "true", "dbaas.wso2.com/instance": id},
+		"matchLabels": map[string]interface{}{dbaasv1.LabelMetrics: "true", dbaasv1.LabelInstance: id},
 	}, "spec", "selector")
 	_ = unstructured.SetNestedSlice(sm.Object, []interface{}{
 		map[string]interface{}{"port": "metrics", "interval": "15s", "path": "/metrics"},
@@ -366,27 +373,37 @@ func (c *Client) DeployMonitoring(ctx context.Context, id, ns, vmAddr string, pg
 // ============================================================
 
 func (c *Client) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.ResourceRefs) {
-	if refs.ServiceMonitor != "" {
-		_ = c.Dynamic.Resource(smGVR).Namespace(ns).Delete(ctx, refs.ServiceMonitor, metav1.DeleteOptions{})
+	type deleteTask struct {
+		gvr       schema.GroupVersionResource
+		namespace string
+		name      string
 	}
-	if refs.VMName != "" {
-		_ = c.Dynamic.Resource(vmGVR).Namespace(ns).Delete(ctx, refs.VMName, metav1.DeleteOptions{})
+	tasks := []deleteTask{
+		{smGVR, ns, refs.ServiceMonitor},
+		{vmGVR, ns, refs.VMName},
+		{dvGVR, ns, refs.DataVolumeName},
+		{secretGVR, ns, refs.SecretName},
+		{nadGVR, ns, refs.NADName},
+		{subnetGVR, "", refs.SubnetName},
+		{vpcGVR, "", refs.VPCName},
 	}
-	if refs.DataVolumeName != "" {
-		_ = c.Dynamic.Resource(dvGVR).Namespace(ns).Delete(ctx, refs.DataVolumeName, metav1.DeleteOptions{})
+
+	var wg sync.WaitGroup
+	for _, t := range tasks {
+		if t.name == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(dt deleteTask) {
+			defer wg.Done()
+			if dt.namespace != "" {
+				_ = c.Dynamic.Resource(dt.gvr).Namespace(dt.namespace).Delete(ctx, dt.name, metav1.DeleteOptions{})
+			} else {
+				_ = c.Dynamic.Resource(dt.gvr).Delete(ctx, dt.name, metav1.DeleteOptions{})
+			}
+		}(t)
 	}
-	if refs.SecretName != "" {
-		_ = c.Dynamic.Resource(secretGVR).Namespace(ns).Delete(ctx, refs.SecretName, metav1.DeleteOptions{})
-	}
-	if refs.NADName != "" {
-		_ = c.Dynamic.Resource(nadGVR).Namespace(ns).Delete(ctx, refs.NADName, metav1.DeleteOptions{})
-	}
-	if refs.SubnetName != "" {
-		_ = c.Dynamic.Resource(subnetGVR).Delete(ctx, refs.SubnetName, metav1.DeleteOptions{})
-	}
-	if refs.VPCName != "" {
-		_ = c.Dynamic.Resource(vpcGVR).Delete(ctx, refs.VPCName, metav1.DeleteOptions{})
-	}
+	wg.Wait()
 }
 
 // ============================================================
@@ -407,18 +424,25 @@ func newUnstructured(apiVersion, kind, name, namespace string) *unstructured.Uns
 	return obj
 }
 
-func hashByte(s string) int {
-	if len(s) == 0 {
-		return 1
+// ignoreAlreadyExists returns nil if err is an AlreadyExists API error, otherwise err.
+func ignoreAlreadyExists(err error) error {
+	if apierrors.IsAlreadyExists(err) {
+		return nil
 	}
-	h := 0
-	for _, c := range s {
-		h = (h*31 + int(c)) % 250
-	}
-	if h <= 0 {
-		h = 1
-	}
-	return h
+	return err
+}
+
+// subnetCIDRForID uses FNV-32a to derive a /24 subnet CIDR from an instance name.
+// The scheme 10.A.B.0/24 (A ∈ [100,227], B ∈ [0,255]) gives 32,768 possible subnets,
+// dramatically reducing hash collisions compared to a single-byte hash.
+func subnetCIDRForID(id string) (cidr, gw string) {
+	h := fnv.New32a()
+	h.Write([]byte(id))
+	v := h.Sum32()
+	a := 100 + int((v>>8)&0x7F) // 100–227
+	b := int(v & 0xFF)          // 0–255
+	return fmt.Sprintf("10.%d.%d.0/24", a, b),
+		fmt.Sprintf("10.%d.%d.1", a, b)
 }
 
 func randomString(n int) string {

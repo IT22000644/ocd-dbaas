@@ -3,16 +3,6 @@ package harvester
 import "fmt"
 
 func buildCloudInit(p VMCreateParams, adminPw, replPw, exporterPw, luksKey string) string {
-	dbName := p.DBName
-	if dbName == "" {
-		dbName = p.ID
-	}
-
-	port := p.Port
-	if port == 0 {
-		port = 5432
-	}
-
 	backupConfig := "# backups disabled"
 	if p.BackupEnabled && p.S3Config != nil {
 		backupConfig = fmt.Sprintf(
@@ -52,8 +42,8 @@ runcmd:
 final_message: "DBaaS bootstrap complete for %s"
 `,
 		p.ID,
-		dbName,
-		port,
+		p.DBName,
+		p.Port,
 		p.MasterUser,
 		adminPw,
 		replPw,

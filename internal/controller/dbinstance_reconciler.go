@@ -3,12 +3,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -37,7 +37,6 @@ func (r *DBInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Fetch the DBInstance CRD
 	var inst dbaasv1.DBInstance
 	if err := r.Get(ctx, req.NamespacedName, &inst); err != nil {
 		if errors.IsNotFound(err) {
@@ -66,15 +65,15 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// --- Handle stop/start ---
-	if inst.Spec.Running != nil && !*inst.Spec.Running && inst.Status.Phase == "available" {
+	if inst.Spec.Running != nil && !*inst.Spec.Running && inst.Status.Phase == dbaasv1.StatusAvailable {
 		return r.reconcileStop(ctx, &inst)
 	}
-	if inst.Spec.Running != nil && *inst.Spec.Running && inst.Status.Phase == "stopped" {
+	if inst.Spec.Running != nil && *inst.Spec.Running && inst.Status.Phase == dbaasv1.StatusStopped {
 		return r.reconcileStart(ctx, &inst)
 	}
 
 	// --- Handle spec changes on available instance ---
-	if inst.Status.Phase == "available" && inst.Generation != inst.Status.ObservedGeneration {
+	if inst.Status.Phase == dbaasv1.StatusAvailable && inst.Generation != inst.Status.ObservedGeneration {
 		return r.reconcileModify(ctx, &inst)
 	}
 
@@ -109,26 +108,17 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 func (r *DBInstanceReconciler) phaseNamespace(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
 	ns := fmt.Sprintf("dbaas-%s", inst.Name)
-
-	// Idempotent: create namespace if not exists
-	var existing corev1.Namespace
-	if err := r.Get(ctx, types.NamespacedName{Name: ns}, &existing); err != nil {
-		if errors.IsNotFound(err) {
-			nsObj := &corev1.Namespace{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   ns,
-					Labels: map[string]string{"dbaas.wso2.com/instance": inst.Name},
-				},
-			}
-			if err := r.Create(ctx, nsObj); err != nil && !errors.IsAlreadyExists(err) {
-				return r.fail(ctx, inst, "NamespaceCreateFailed", err)
-			}
-		} else {
-			return ctrl.Result{}, err
-		}
+	nsObj := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   ns,
+			Labels: map[string]string{dbaasv1.LabelInstance: inst.Name},
+		},
+	}
+	if err := r.Create(ctx, nsObj); err != nil && !errors.IsAlreadyExists(err) {
+		return r.fail(ctx, inst, "NamespaceCreateFailed", err)
 	}
 
-	inst.Status.Phase = "creating"
+	inst.Status.Phase = dbaasv1.StatusCreating
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseNamespaceCreated
 	inst.Status.Resources.Namespace = ns
 	inst.Status.Message = "Namespace created"
@@ -149,12 +139,8 @@ func (r *DBInstanceReconciler) phaseNetwork(ctx context.Context, inst *dbaasv1.D
 	if consumerVLAN == "" {
 		consumerVLAN = "10.50.0.0/24"
 	}
-	port := inst.Spec.Port
-	if port == 0 {
-		port = 5432
-	}
 
-	vpcName, subnetName, nadName, err := r.Harvester.CreateVPCNetwork(ctx, id, ns, consumerVLAN, port)
+	vpcName, subnetName, nadName, err := r.Harvester.CreateVPCNetwork(ctx, id, ns, consumerVLAN)
 	if err != nil {
 		return r.fail(ctx, inst, "NetworkFailed", err)
 	}
@@ -207,7 +193,6 @@ func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInst
 		return r.fail(ctx, inst, "InvalidClass", fmt.Errorf("unknown class: %s", inst.Spec.DBInstanceClass))
 	}
 
-	// Resolve defaults
 	masterUser := inst.Spec.MasterUsername
 	if masterUser == "" {
 		masterUser = "dbadmin"
@@ -216,16 +201,11 @@ func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInst
 	if dbName == "" {
 		dbName = id
 	}
-	port := inst.Spec.Port
-	if port == 0 {
-		port = 5432
-	}
 	osImage := inst.Spec.OSImage
 	if osImage == "" {
 		osImage = "ubuntu-22.04-server-cloudimg-amd64.img"
 	}
 
-	// Generate cloud-init and credentials
 	vmName, secretName, err := r.Harvester.CreatePostgresVM(ctx, harvester.VMCreateParams{
 		ID:             id,
 		Namespace:      ns,
@@ -237,7 +217,7 @@ func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInst
 		NADName:        inst.Status.Resources.NADName,
 		MasterUser:     masterUser,
 		DBName:         dbName,
-		Port:           port,
+		Port:           specPort(inst.Spec.Port),
 		MaxConnections: classSpec.MaxConnections,
 		BackupEnabled:  inst.Spec.BackupRetentionPeriod > 0,
 		BackupWindow:   inst.Spec.PreferredBackupWindow,
@@ -251,7 +231,7 @@ func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInst
 	inst.Status.Resources.SecretName = secretName
 	inst.Status.MasterUserSecret = &dbaasv1.MasterUserSecretRef{
 		Name:   secretName,
-		Status: "active",
+		Status: dbaasv1.SecretStatusActive,
 	}
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseVMCreated
 	inst.Status.Message = "VM created, waiting for PostgreSQL to initialize"
@@ -262,39 +242,30 @@ func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInst
 func (r *DBInstanceReconciler) phaseWaitReady(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
 	ns := inst.Status.Resources.Namespace
 
-	// Check if the VM is running and has an IP
-	ip, running, err := r.Harvester.GetVMIPAddress(ctx, ns, inst.Status.Resources.VMName)
-	if err != nil || !running || ip == "" {
+	readiness, err := r.Harvester.GetVMIReadiness(ctx, ns, inst.Status.Resources.VMName)
+	if err != nil || !readiness.Running || readiness.IP == "" {
 		inst.Status.Message = "Waiting for VM to become ready"
 		inst.Status.ProvisioningPhase = dbaasv1.PhaseWaitingForCloudInit
 		_ = r.statusUpdate(ctx, inst)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Check if PostgreSQL is accepting connections
-	port := inst.Spec.Port
-	if port == 0 {
-		port = 5432
+	if !readiness.Ready {
+		inst.Status.Message = fmt.Sprintf("VM running at %s, waiting for PostgreSQL to finish initializing", readiness.IP)
+		_ = r.statusUpdate(ctx, inst)
+		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
+	port := specPort(inst.Spec.Port)
 	dbName := inst.Spec.DBName
 	if dbName == "" {
 		dbName = inst.Name
 	}
 
-	// Try to connect — if this succeeds, PG is ready
-	pgReady := r.Harvester.CheckPostgresReady(ctx, ns, inst.Status.Resources.VMName, port)
-	if !pgReady {
-		inst.Status.Message = fmt.Sprintf("VM running at %s, waiting for PostgreSQL to finish initializing", ip)
-		_ = r.statusUpdate(ctx, inst)
-		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
-	}
-
-	// Database is ready
 	inst.Status.Endpoint = &dbaasv1.Endpoint{
-		Address: ip,
+		Address: readiness.IP,
 		Port:    port,
-		JDBCURL: fmt.Sprintf("jdbc:postgresql://%s:%d/%s?ssl=true&sslmode=verify-full", ip, port, dbName),
+		JDBCURL: fmt.Sprintf("jdbc:postgresql://%s:%d/%s?ssl=true&sslmode=verify-full", readiness.IP, port, dbName),
 	}
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseDatabaseReady
 	inst.Status.Message = "PostgreSQL is ready"
@@ -310,12 +281,8 @@ func (r *DBInstanceReconciler) phaseMonitoring(ctx context.Context, inst *dbaasv
 
 	id := inst.Name
 	ns := inst.Status.Resources.Namespace
-	port := inst.Spec.Port
-	if port == 0 {
-		port = 5432
-	}
 
-	smName, grafanaURL, promTarget, err := r.Harvester.DeployMonitoring(ctx, id, ns, inst.Status.Endpoint.Address, port)
+	smName, grafanaURL, promTarget, err := r.Harvester.DeployMonitoring(ctx, id, ns, inst.Status.Endpoint.Address, inst.Status.Endpoint.Port)
 	if err != nil {
 		// Non-fatal — DB works without monitoring
 		log.FromContext(ctx).Error(err, "monitoring setup failed (non-fatal)")
@@ -331,7 +298,7 @@ func (r *DBInstanceReconciler) phaseMonitoring(ctx context.Context, inst *dbaasv
 }
 
 func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
-	inst.Status.Phase = "available"
+	inst.Status.Phase = dbaasv1.StatusAvailable
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseAvailable
 	inst.Status.ObservedGeneration = inst.Generation
 	inst.Status.Message = "Database instance is available"
@@ -345,7 +312,7 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 
 func (r *DBInstanceReconciler) reconcileStop(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
 	ns := inst.Status.Resources.Namespace
-	inst.Status.Phase = "stopping"
+	inst.Status.Phase = dbaasv1.StatusStopping
 	inst.Status.Message = "Stopping VM"
 	_ = r.statusUpdate(ctx, inst)
 
@@ -353,7 +320,7 @@ func (r *DBInstanceReconciler) reconcileStop(ctx context.Context, inst *dbaasv1.
 		return r.fail(ctx, inst, "StopFailed", err)
 	}
 
-	inst.Status.Phase = "stopped"
+	inst.Status.Phase = dbaasv1.StatusStopped
 	inst.Status.Message = "Stopped. Storage preserved."
 	inst.Status.ObservedGeneration = inst.Generation
 	return ctrl.Result{}, r.statusUpdate(ctx, inst)
@@ -361,14 +328,14 @@ func (r *DBInstanceReconciler) reconcileStop(ctx context.Context, inst *dbaasv1.
 
 func (r *DBInstanceReconciler) reconcileStart(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
 	ns := inst.Status.Resources.Namespace
-	inst.Status.Phase = "starting"
+	inst.Status.Phase = dbaasv1.StatusStarting
 	_ = r.statusUpdate(ctx, inst)
 
 	if err := r.Harvester.StartVM(ctx, ns, inst.Status.Resources.VMName); err != nil {
 		return r.fail(ctx, inst, "StartFailed", err)
 	}
 
-	inst.Status.Phase = "available"
+	inst.Status.Phase = dbaasv1.StatusAvailable
 	inst.Status.Message = "Started"
 	inst.Status.ObservedGeneration = inst.Generation
 	return ctrl.Result{}, r.statusUpdate(ctx, inst)
@@ -376,14 +343,35 @@ func (r *DBInstanceReconciler) reconcileStart(ctx context.Context, inst *dbaasv1
 
 func (r *DBInstanceReconciler) reconcileModify(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
 	ns := inst.Status.Resources.Namespace
-	inst.Status.Phase = "modifying"
+	inst.Status.Phase = dbaasv1.StatusModifying
 	_ = r.statusUpdate(ctx, inst)
 
-	classSpec := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]
-	_ = r.Harvester.ResizeVM(ctx, ns, inst.Status.Resources.VMName, classSpec.CPUCores, classSpec.MemoryMB)
-	_ = r.Harvester.ResizeDataVolume(ctx, ns, inst.Status.Resources.DataVolumeName, inst.Spec.AllocatedStorage)
+	classSpec, ok := dbaasv1.InstanceClasses[inst.Spec.DBInstanceClass]
+	if !ok {
+		return r.fail(ctx, inst, "InvalidClass", fmt.Errorf("unknown class: %s", inst.Spec.DBInstanceClass))
+	}
 
-	inst.Status.Phase = "available"
+	var wg sync.WaitGroup
+	var vmErr, dvErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		vmErr = r.Harvester.ResizeVM(ctx, ns, inst.Status.Resources.VMName, classSpec.CPUCores, classSpec.MemoryMB)
+	}()
+	go func() {
+		defer wg.Done()
+		dvErr = r.Harvester.ResizeDataVolume(ctx, ns, inst.Status.Resources.DataVolumeName, inst.Spec.AllocatedStorage)
+	}()
+	wg.Wait()
+
+	if vmErr != nil {
+		return r.fail(ctx, inst, "ResizeVMFailed", vmErr)
+	}
+	if dvErr != nil {
+		return r.fail(ctx, inst, "ResizeStorageFailed", dvErr)
+	}
+
+	inst.Status.Phase = dbaasv1.StatusAvailable
 	inst.Status.Message = "Modifications applied"
 	inst.Status.ObservedGeneration = inst.Generation
 	return ctrl.Result{}, r.statusUpdate(ctx, inst)
@@ -399,17 +387,20 @@ func (r *DBInstanceReconciler) reconcileDelete(ctx context.Context, inst *dbaasv
 		return ctrl.Result{}, fmt.Errorf("deletion protection enabled")
 	}
 
-	inst.Status.Phase = "deleting"
+	inst.Status.Phase = dbaasv1.StatusDeleting
 	inst.Status.Message = "Tearing down resources"
 	_ = r.statusUpdate(ctx, inst)
 
-	// Teardown in reverse order — each is safe to retry
 	if ns != "" {
 		logger.Info("Deleting resources", "namespace", ns)
 		r.Harvester.TeardownAll(ctx, inst.Name, ns, inst.Status.Resources)
+		nsObj := &corev1.Namespace{}
+		nsObj.Name = ns
+		if err := r.Delete(ctx, nsObj); err != nil && !errors.IsNotFound(err) {
+			logger.Error(err, "failed to delete namespace", "namespace", ns)
+		}
 	}
 
-	// Remove finalizer
 	controllerutil.RemoveFinalizer(inst, dbaasv1.FinalizerName)
 	return ctrl.Result{}, r.Update(ctx, inst)
 }
@@ -423,7 +414,7 @@ func (r *DBInstanceReconciler) advance(ctx context.Context, inst *dbaasv1.DBInst
 }
 
 func (r *DBInstanceReconciler) fail(ctx context.Context, inst *dbaasv1.DBInstance, reason string, err error) (ctrl.Result, error) {
-	inst.Status.Phase = "failed"
+	inst.Status.Phase = dbaasv1.StatusFailed
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseFailed
 	inst.Status.Message = fmt.Sprintf("%s: %v", reason, err)
 	_ = r.statusUpdate(ctx, inst)
@@ -432,4 +423,12 @@ func (r *DBInstanceReconciler) fail(ctx context.Context, inst *dbaasv1.DBInstanc
 
 func (r *DBInstanceReconciler) statusUpdate(ctx context.Context, inst *dbaasv1.DBInstance) error {
 	return r.Status().Update(ctx, inst)
+}
+
+// specPort returns 5432 if port is 0, otherwise port.
+func specPort(port int) int {
+	if port == 0 {
+		return 5432
+	}
+	return port
 }

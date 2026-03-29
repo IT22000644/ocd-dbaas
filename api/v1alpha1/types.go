@@ -241,6 +241,25 @@ const (
 	PhaseAvailable           = "Available"
 	PhaseFailed              = "Failed"
 
+	// Status.Phase values (RDS-compatible lowercase strings)
+	StatusCreating  = "creating"
+	StatusAvailable = "available"
+	StatusStopping  = "stopping"
+	StatusStopped   = "stopped"
+	StatusStarting  = "starting"
+	StatusModifying = "modifying"
+	StatusDeleting  = "deleting"
+	StatusFailed    = "failed"
+
+	// MasterUserSecretRef.Status values
+	SecretStatusActive   = "active"
+	SecretStatusImpaired = "impaired"
+
+	// Label keys applied to all Harvester resources owned by a DBInstance
+	LabelInstance = "dbaas.wso2.com/instance"
+	LabelRole     = "dbaas.wso2.com/role"
+	LabelMetrics  = "dbaas.wso2.com/metrics"
+
 	FinalizerName = "dbaas.wso2.com/cleanup"
 )
 

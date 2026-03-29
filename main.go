@@ -39,9 +39,11 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	logger := ctrl.Log.WithName("setup")
+	ctx := ctrl.SetupSignalHandler()
 
 	// Build controller manager
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	config := ctrl.GetConfigOrDie()
+	mgr, err := ctrl.NewManager(config, ctrl.Options{
 		Scheme:                 scheme,
 		MetricsBindAddress:     *metricsAddr,
 		HealthProbeBindAddress: *probeAddr,
@@ -54,7 +56,6 @@ func main() {
 	}
 
 	// Build dynamic client for Harvester APIs (KubeVirt, CDI, Kube-OVN)
-	config := ctrl.GetConfigOrDie()
 	dynClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		logger.Error(err, "unable to create dynamic client")
@@ -85,7 +86,7 @@ func main() {
 	// Start REST API gateway in a goroutine
 	go func() {
 		// Wait for the cache to sync before serving API requests
-		if !mgr.GetCache().WaitForCacheSync(ctrl.SetupSignalHandler()) {
+		if !mgr.GetCache().WaitForCacheSync(ctx) {
 			logger.Error(fmt.Errorf("cache sync failed"), "gateway startup aborted")
 			return
 		}
@@ -100,7 +101,7 @@ func main() {
 		"metrics", *metricsAddr,
 		"grafana", *grafanaURL,
 	)
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		logger.Error(err, "manager exited with error")
 		os.Exit(1)
 	}
