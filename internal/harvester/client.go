@@ -176,11 +176,11 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	secret := newUnstructured("v1", "Secret", secretName, p.Namespace)
 	_ = unstructured.SetNestedField(secret.Object, "Opaque", "type")
 	_ = unstructured.SetNestedField(secret.Object, map[string]interface{}{
-		"admin_user":     p.MasterUser,
-		"admin_password": adminPw,
-		"repl_password":  replPw,
+		"admin_user":        p.MasterUser,
+		"admin_password":    adminPw,
+		"repl_password":     replPw,
 		"exporter_password": exporterPw,
-		"luks_key":       luksKey,
+		"luks_key":          luksKey,
 	}, "stringData")
 	if _, err = c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
 		return
@@ -268,7 +268,9 @@ func (c *Client) GetVMIPAddress(ctx context.Context, ns, vmName string) (ip stri
 	interfaces, _, _ := unstructured.NestedSlice(vmi.Object, "status", "interfaces")
 	for _, iface := range interfaces {
 		ifMap, ok := iface.(map[string]interface{})
-		if !ok { continue }
+		if !ok {
+			continue
+		}
 		if addr, ok := ifMap["ipAddress"].(string); ok && addr != "" {
 			ip = addr
 			break
@@ -406,10 +408,16 @@ func newUnstructured(apiVersion, kind, name, namespace string) *unstructured.Uns
 }
 
 func hashByte(s string) int {
-	if len(s) == 0 { return 1 }
+	if len(s) == 0 {
+		return 1
+	}
 	h := 0
-	for _, c := range s { h = (h*31 + int(c)) % 250 }
-	if h <= 0 { h = 1 }
+	for _, c := range s {
+		h = (h*31 + int(c)) % 250
+	}
+	if h <= 0 {
+		h = 1
+	}
 	return h
 }
 

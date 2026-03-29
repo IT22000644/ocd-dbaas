@@ -209,13 +209,21 @@ func (r *DBInstanceReconciler) phaseVM(ctx context.Context, inst *dbaasv1.DBInst
 
 	// Resolve defaults
 	masterUser := inst.Spec.MasterUsername
-	if masterUser == "" { masterUser = "dbadmin" }
+	if masterUser == "" {
+		masterUser = "dbadmin"
+	}
 	dbName := inst.Spec.DBName
-	if dbName == "" { dbName = id }
+	if dbName == "" {
+		dbName = id
+	}
 	port := inst.Spec.Port
-	if port == 0 { port = 5432 }
+	if port == 0 {
+		port = 5432
+	}
 	osImage := inst.Spec.OSImage
-	if osImage == "" { osImage = "ubuntu-22.04-server-cloudimg-amd64.img" }
+	if osImage == "" {
+		osImage = "ubuntu-22.04-server-cloudimg-amd64.img"
+	}
 
 	// Generate cloud-init and credentials
 	vmName, secretName, err := r.Harvester.CreatePostgresVM(ctx, harvester.VMCreateParams{
@@ -265,10 +273,14 @@ func (r *DBInstanceReconciler) phaseWaitReady(ctx context.Context, inst *dbaasv1
 
 	// Check if PostgreSQL is accepting connections
 	port := inst.Spec.Port
-	if port == 0 { port = 5432 }
+	if port == 0 {
+		port = 5432
+	}
 
 	dbName := inst.Spec.DBName
-	if dbName == "" { dbName = inst.Name }
+	if dbName == "" {
+		dbName = inst.Name
+	}
 
 	// Try to connect — if this succeeds, PG is ready
 	pgReady := r.Harvester.CheckPostgresReady(ctx, ns, inst.Status.Resources.VMName, port)
@@ -299,7 +311,9 @@ func (r *DBInstanceReconciler) phaseMonitoring(ctx context.Context, inst *dbaasv
 	id := inst.Name
 	ns := inst.Status.Resources.Namespace
 	port := inst.Spec.Port
-	if port == 0 { port = 5432 }
+	if port == 0 {
+		port = 5432
+	}
 
 	smName, grafanaURL, promTarget, err := r.Harvester.DeployMonitoring(ctx, id, ns, inst.Status.Endpoint.Address, port)
 	if err != nil {

@@ -32,17 +32,15 @@ A Kubernetes-native Database-as-a-Service that provisions managed PostgreSQL ins
 ### Install
 
 ```bash
-# 1. Install CRDs
-kubectl apply -f config/crd/
+# Validate the source locally
+go test ./...
+go build ./...
 
-# 2. Install RBAC and controller
-kubectl apply -f config/rbac/
-kubectl apply -f config/manager/
-
-# 3. Verify
-kubectl get crd dbinstances.dbaas.wso2.com
-kubectl -n dbaas-system get pods
+# Apply the sample custom resource after your CRD/controller manifests are installed
+kubectl apply -f config/samples/dbinstance.yaml
 ```
+
+Generated deployment manifests such as `config/crd/`, `config/rbac/`, and `config/manager/` are not currently checked into this repository.
 
 ### Required Permissions
 
