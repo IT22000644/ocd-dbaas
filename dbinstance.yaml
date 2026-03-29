@@ -1,0 +1,57 @@
+# Sample: Create a PostgreSQL database on Harvester
+#
+# Apply with: kubectl apply -f config/samples/
+# Watch progress: kubectl get dbi orders-prod -w
+# Check details:  kubectl describe dbi orders-prod
+# Get JDBC URL:   kubectl get dbi orders-prod -o jsonpath='{.status.endpoint.jdbcUrl}'
+# Get password:   kubectl get secret pg-orders-prod-credentials -n dbaas-orders-prod -o jsonpath='{.data.admin_password}' | base64 -d
+
+apiVersion: dbaas.wso2.com/v1alpha1
+kind: DBInstance
+metadata:
+  name: orders-prod
+spec:
+  dbInstanceClass: db.m5.large      # 2 CPU, 8GB RAM, 200 max connections
+  engineVersion: "16"
+  dbName: orders
+  port: 5432
+  masterUsername: orders_admin
+  manageMasterUserPassword: true     # auto-generate and store in K8s Secret
+  allocatedStorage: 100              # 100 GiB LUKS-encrypted block storage
+  storageType: longhorn
+  dbSubnetGroupName: "10.50.0.0/24"  # consumer VLAN for app access
+  backupRetentionPeriod: 7           # daily backups, 7-day retention
+  preferredBackupWindow: "02:00-03:00"
+  deletionProtection: true
+  running: true
+  osImage: ubuntu-22.04-server-cloudimg-amd64.img
+  tags:
+    environment: production
+    team: orders-service
+---
+# Sample: Small dev database (no backups, no deletion protection)
+apiVersion: dbaas.wso2.com/v1alpha1
+kind: DBInstance
+metadata:
+  name: analytics-dev
+spec:
+  dbInstanceClass: db.t3.medium     # 2 CPU, 4GB RAM
+  allocatedStorage: 20
+  dbName: analytics
+  backupRetentionPeriod: 0          # backups disabled
+  deletionProtection: false
+  tags:
+    environment: development
+---
+# Sample: Stop a database (preserves storage, saves compute)
+# kubectl patch dbi analytics-dev --type merge -p '{"spec":{"running":false}}'
+#
+# Start it again:
+# kubectl patch dbi analytics-dev --type merge -p '{"spec":{"running":true}}'
+#
+# Resize live:
+# kubectl patch dbi orders-prod --type merge -p '{"spec":{"dbInstanceClass":"db.m5.xlarge","allocatedStorage":200}}'
+#
+# Delete (must disable protection first):
+# kubectl patch dbi orders-prod --type merge -p '{"spec":{"deletionProtection":false}}'
+# kubectl delete dbi orders-prod
