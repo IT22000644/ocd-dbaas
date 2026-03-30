@@ -47,6 +47,9 @@ var (
 	smGVR = schema.GroupVersionResource{
 		Group: "monitoring.coreos.com", Version: "v1", Resource: "servicemonitors",
 	}
+	vpcPeeringGVR = schema.GroupVersionResource{
+		Group: "kubeovn.io", Version: "v1", Resource: "vpc-peerings",
+	}
 )
 
 const vmiPhaseRunning = "Running"
@@ -369,6 +372,29 @@ func (c *Client) DeployMonitoring(ctx context.Context, id, ns, vmAddr string, pg
 }
 
 // ============================================================
+// VPC Peering: Kube-OVN VpcPeering between DBaaS VPC and external VPC
+// ============================================================
+
+// CreateVpcPeering creates a Kube-OVN VpcPeering resource that enables
+// bidirectional routing between the DBaaS VPC and a remote VPC (e.g.
+// an RKE2 cluster VPC).
+func (c *Client) CreateVpcPeering(ctx context.Context, id, dbVpcName, dbSubnetName, remoteVpc, remoteSubnet string) (string, error) {
+	name := fmt.Sprintf("dbaas-%s-peering", id)
+	peering := newUnstructured("kubeovn.io/v1", "VpcPeering", name, "")
+	_ = unstructured.SetNestedField(peering.Object, dbVpcName, "spec", "localVpc")
+	_ = unstructured.SetNestedField(peering.Object, remoteVpc, "spec", "remoteVpc")
+	_ = unstructured.SetNestedSlice(peering.Object, []interface{}{dbSubnetName}, "spec", "localSubnets")
+	_ = unstructured.SetNestedSlice(peering.Object, []interface{}{remoteSubnet}, "spec", "remoteSubnets")
+	if _, err := c.Dynamic.Resource(vpcPeeringGVR).Create(ctx, peering, metav1.CreateOptions{}); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return name, nil
+		}
+		return "", err
+	}
+	return name, nil
+}
+
+// ============================================================
 // Teardown
 // ============================================================
 
@@ -385,6 +411,7 @@ func (c *Client) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.Re
 		{secretGVR, ns, refs.SecretName},
 		{nadGVR, ns, refs.NADName},
 		{subnetGVR, "", refs.SubnetName},
+		{vpcPeeringGVR, "", refs.VpcPeeringName},
 		{vpcGVR, "", refs.VPCName},
 	}
 

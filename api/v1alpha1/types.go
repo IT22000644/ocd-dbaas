@@ -54,6 +54,11 @@ type DBInstanceSpec struct {
 	// DBSubnetGroupName is the consumer VLAN CIDR or Kube-OVN subnet for app access.
 	DBSubnetGroupName string `json:"dbSubnetGroupName,omitempty"`
 
+	// VpcPeering configures Kube-OVN VPC peering between the DBaaS VPC and
+	// an external VPC (e.g. the RKE2 cluster VPC) so application pods can
+	// reach the database without being co-located in the DBaaS namespace.
+	VpcPeering *VpcPeeringConfig `json:"vpcPeering,omitempty"`
+
 	// BackupRetentionPeriod in days. 0 = disabled. Default 7.
 	BackupRetentionPeriod int `json:"backupRetentionPeriod,omitempty"`
 
@@ -86,6 +91,15 @@ type DBInstanceSpec struct {
 type SecretKeyRef struct {
 	Name string `json:"name"`
 	Key  string `json:"key"`
+}
+
+// VpcPeeringConfig specifies the remote VPC and subnet to peer with.
+type VpcPeeringConfig struct {
+	// RemoteVpc is the name of the Kube-OVN VPC to peer with (e.g. the RKE2 cluster VPC).
+	RemoteVpc string `json:"remoteVpc"`
+
+	// RemoteSubnet is the Kube-OVN subnet name in the remote VPC.
+	RemoteSubnet string `json:"remoteSubnet"`
 }
 
 type S3BackupConfig struct {
@@ -155,6 +169,7 @@ type ResourceRefs struct {
 	VMName         string `json:"vmName,omitempty"`
 	SecretName     string `json:"secretName,omitempty"`
 	ServiceMonitor string `json:"serviceMonitor,omitempty"`
+	VpcPeeringName string `json:"vpcPeeringName,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -238,6 +253,7 @@ const (
 	PhaseWaitingForCloudInit = "WaitingForCloudInit"
 	PhaseDatabaseReady       = "DatabaseReady"
 	PhaseMonitoringDeployed  = "MonitoringDeployed"
+	PhaseVpcPeeringCreated   = "VpcPeeringCreated"
 	PhaseAvailable           = "Available"
 	PhaseFailed              = "Failed"
 

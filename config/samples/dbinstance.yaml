@@ -20,6 +20,9 @@ spec:
   allocatedStorage: 100              # 100 GiB LUKS-encrypted block storage
   storageType: longhorn
   dbSubnetGroupName: "10.50.0.0/24"  # consumer VLAN for app access
+  vpcPeering:                          # peer with RKE2 cluster VPC
+    remoteVpc: rke2-cluster-vpc        # name of the RKE2 Kube-OVN VPC
+    remoteSubnet: rke2-cluster-subnet  # subnet in the RKE2 VPC
   backupRetentionPeriod: 7           # daily backups, 7-day retention
   preferredBackupWindow: "02:00-03:00"
   deletionProtection: true

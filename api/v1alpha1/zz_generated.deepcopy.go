@@ -75,6 +75,11 @@ func (in *DBInstanceSpec) DeepCopyInto(out *DBInstanceSpec) {
 		*out = new(S3BackupConfig)
 		**out = **in
 	}
+	if in.VpcPeering != nil {
+		in, out := &in.VpcPeering, &out.VpcPeering
+		*out = new(VpcPeeringConfig)
+		**out = **in
+	}
 	if in.Tags != nil {
 		in, out := &in.Tags, &out.Tags
 		*out = make(map[string]string, len(*in))

@@ -92,6 +92,8 @@ func (r *DBInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	case dbaasv1.PhaseDatabaseReady:
 		return r.phaseMonitoring(ctx, &inst)
 	case dbaasv1.PhaseMonitoringDeployed:
+		return r.phaseVpcPeering(ctx, &inst)
+	case dbaasv1.PhaseVpcPeeringCreated:
 		return r.phaseAvailable(ctx, &inst)
 	case dbaasv1.PhaseAvailable:
 		return ctrl.Result{}, nil // fully reconciled
@@ -304,6 +306,32 @@ func (r *DBInstanceReconciler) phaseAvailable(ctx context.Context, inst *dbaasv1
 	inst.Status.Message = "Database instance is available"
 
 	return ctrl.Result{}, r.statusUpdate(ctx, inst)
+}
+
+func (r *DBInstanceReconciler) phaseVpcPeering(ctx context.Context, inst *dbaasv1.DBInstance) (ctrl.Result, error) {
+	// Skip if already done or not requested
+	if inst.Status.Resources.VpcPeeringName != "" || inst.Spec.VpcPeering == nil {
+		inst.Status.ProvisioningPhase = dbaasv1.PhaseVpcPeeringCreated
+		return r.advance(ctx, inst)
+	}
+
+	peeringName, err := r.Harvester.CreateVpcPeering(
+		ctx,
+		inst.Name,
+		inst.Status.Resources.VPCName,
+		inst.Status.Resources.SubnetName,
+		inst.Spec.VpcPeering.RemoteVpc,
+		inst.Spec.VpcPeering.RemoteSubnet,
+	)
+	if err != nil {
+		return r.fail(ctx, inst, "VpcPeeringFailed", err)
+	}
+
+	inst.Status.Resources.VpcPeeringName = peeringName
+	inst.Status.ProvisioningPhase = dbaasv1.PhaseVpcPeeringCreated
+	inst.Status.Message = "VPC peering established"
+
+	return r.advance(ctx, inst)
 }
 
 // ============================================================
