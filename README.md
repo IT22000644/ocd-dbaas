@@ -500,6 +500,61 @@ Key points:
 - Client traffic reaches the database through the VPC route and the subnet `allowSubnets` rule, not through a public LoadBalancer.
 - Monitoring is separate from the data path: the controller can also create a metrics `Service` and `ServiceMonitor`, but application traffic goes directly to the PostgreSQL VM endpoint.
 
+### VPC Peering
+
+When application pods run in a separate VPC (for example, an RKE2 cluster), they cannot reach the database VPC by default. The optional `vpcPeering` field in the `DBInstance` spec creates a Kube-OVN `VpcPeering` resource that establishes bidirectional routing between the two VPCs.
+
+The following diagram uses the `orders-prod` sample, where the RKE2 application cluster lives in `rke2-cluster-vpc` and the database is provisioned in `dbaas-orders-prod-vpc`:
+
+```
+┌─────────────────────────────────────────┐       ┌─────────────────────────────────────────┐
+│  RKE2 Cluster VPC: rke2-cluster-vpc     │       │  DBaaS VPC: dbaas-orders-prod-vpc       │
+│                                         │       │                                         │
+│  ┌───────────────────────────────────┐  │       │  ┌───────────────────────────────────┐  │
+│  │ Subnet: rke2-cluster-subnet       │  │       │  │ Subnet: dbaas-orders-prod-subnet  │  │
+│  │ CIDR: 10.16.0.0/16               │  │       │  │ CIDR: 10.100.X.0/24              │  │
+│  │                                   │  │       │  │                                   │  │
+│  │  ┌─────────────────────────────┐  │  │       │  │  ┌─────────────────────────────┐  │  │
+│  │  │ App Pod: orders-service     │  │  │       │  │  │ KubeVirt VM: pg-orders-prod │  │  │
+│  │  │ IP: 10.16.5.12              │  │  │       │  │  │ IP: 10.100.X.Y              │  │  │
+│  │  │                             │  │  │       │  │  │                             │  │  │
+│  │  │ psql -h 10.100.X.Y ──────────────────────────▶│ PostgreSQL :5432             │  │  │
+│  │  │                             │  │  │       │  │  │ (SSL-only, LUKS-encrypted)  │  │  │
+│  │  └─────────────────────────────┘  │  │       │  │  └─────────────────────────────┘  │  │
+│  │                                   │  │       │  │                                   │  │
+│  └───────────────────────────────────┘  │       │  └───────────────────────────────────┘  │
+│                                         │       │                                         │
+└──────────────────┬──────────────────────┘       └──────────────────┬──────────────────────┘
+                   │                                                 │
+                   │       Kube-OVN VpcPeering                       │
+                   │       dbaas-orders-prod-peering                 │
+                   │                                                 │
+                   │  ┌───────────────────────────────────────────┐  │
+                   └──│ localVpc:     dbaas-orders-prod-vpc       │──┘
+                      │ remoteVpc:    rke2-cluster-vpc            │
+                      │ localSubnets: [dbaas-orders-prod-subnet]  │
+                      │ remoteSubnets:[rke2-cluster-subnet]       │
+                      └───────────────────────────────────────────┘
+```
+
+How it works:
+
+1. The controller creates the DBaaS VPC and subnet during normal provisioning (phase `NetworkProvisioned`).
+2. After monitoring is deployed, the `VpcPeering` phase creates a `VpcPeering` resource named `dbaas-{id}-peering`.
+3. Kube-OVN installs bidirectional routes so that pods in `rke2-cluster-subnet` can reach IPs in `dbaas-orders-prod-subnet` and vice versa.
+4. Application pods connect directly to the PostgreSQL VM IP — no LoadBalancer or NodePort required.
+
+To enable VPC peering in a `DBInstance`, add the `vpcPeering` block to the spec:
+
+```yaml
+spec:
+  vpcPeering:
+    remoteVpc: rke2-cluster-vpc
+    remoteSubnet: rke2-cluster-subnet
+```
+
+If `vpcPeering` is omitted, the database is only reachable from the consumer VLAN specified by `dbSubnetGroupName`.
+
 ### Provisioning Phases
 
 The controller advances one phase per reconcile loop iteration:
