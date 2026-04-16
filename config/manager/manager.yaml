@@ -20,7 +20,7 @@ spec:
         runAsNonRoot: true
       containers:
       - name: controller
-        image: wso2vick/ocd-dbaas:v0.1.0
+        image: wso2vick/ocd-dbaas:v0.1.1
         imagePullPolicy: IfNotPresent
         args:
         - --gateway-address=:8080

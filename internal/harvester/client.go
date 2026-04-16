@@ -112,9 +112,26 @@ func (c *Client) CreateVPCNetwork(ctx context.Context, id, ns, consumerVLAN stri
 		created, _ = c.Dynamic.Resource(vpcGVR).Get(ctx, vpcName, metav1.GetOptions{})
 	}
 
-	// 2. Create Subnet
+	// 2. Create NAD (must exist before Subnet — Harvester subnet webhook validates the NAD by provider).
+	provider := fmt.Sprintf("%s.%s.ovn", nadName, ns)
+	nad := newUnstructured("k8s.cni.cncf.io/v1", "NetworkAttachmentDefinition", nadName, ns)
+	nad.SetLabels(map[string]string{
+		"network.harvesterhci.io/type":           "OverlayNetwork",
+		"network.harvesterhci.io/clusternetwork": "mgmt",
+		"network.harvesterhci.io/ready":          "true",
+	})
+	config := fmt.Sprintf(`{"cniVersion":"0.3.1","type":"kube-ovn","server_socket":"/run/openvswitch/kube-ovn-daemon.sock","provider":"%s"}`, provider)
+	_ = unstructured.SetNestedField(nad.Object, config, "spec", "config")
+	if _, e := c.Dynamic.Resource(nadGVR).Namespace(ns).Create(ctx, nad, metav1.CreateOptions{}); e != nil {
+		if err = ignoreAlreadyExists(e); err != nil {
+			return
+		}
+	}
+
+	// 3. Create Subnet (provider links it to the NAD; Harvester webhook requires this).
 	subnet := newUnstructured("kubeovn.io/v1", "Subnet", subnetName, "")
 	_ = unstructured.SetNestedField(subnet.Object, vpcName, "spec", "vpc")
+	_ = unstructured.SetNestedField(subnet.Object, provider, "spec", "provider")
 	_ = unstructured.SetNestedField(subnet.Object, cidr, "spec", "cidrBlock")
 	_ = unstructured.SetNestedField(subnet.Object, gw, "spec", "gateway")
 	_ = unstructured.SetNestedField(subnet.Object, "IPv4", "spec", "protocol")
@@ -122,16 +139,6 @@ func (c *Client) CreateVPCNetwork(ctx context.Context, id, ns, consumerVLAN stri
 	_ = unstructured.SetNestedField(subnet.Object, true, "spec", "private")
 	_ = unstructured.SetNestedSlice(subnet.Object, []interface{}{consumerVLAN}, "spec", "allowSubnets")
 	if _, e := c.Dynamic.Resource(subnetGVR).Create(ctx, subnet, metav1.CreateOptions{}); e != nil {
-		if err = ignoreAlreadyExists(e); err != nil {
-			return
-		}
-	}
-
-	// 3. Create NAD
-	nad := newUnstructured("k8s.cni.cncf.io/v1", "NetworkAttachmentDefinition", nadName, ns)
-	config := fmt.Sprintf(`{"cniVersion":"0.3.1","type":"kube-ovn","server_socket":"/run/openvswitch/kube-ovn-daemon.sock","provider":"%s.%s.ovn"}`, nadName, ns)
-	_ = unstructured.SetNestedField(nad.Object, config, "spec", "config")
-	if _, e := c.Dynamic.Resource(nadGVR).Namespace(ns).Create(ctx, nad, metav1.CreateOptions{}); e != nil {
 		if err = ignoreAlreadyExists(e); err != nil {
 			return
 		}
