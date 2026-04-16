@@ -247,7 +247,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 		},
 		"template": map[string]interface{}{
 			"metadata": map[string]interface{}{
-				"labels": map[string]string{dbaasv1.LabelInstance: p.ID},
+				"labels": map[string]interface{}{dbaasv1.LabelInstance: p.ID},
 				"annotations": map[string]interface{}{
 					"ovn.kubernetes.io/logical_switch": p.SubnetName,
 				},
