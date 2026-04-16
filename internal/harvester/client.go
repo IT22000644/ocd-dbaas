@@ -277,7 +277,7 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 					map[string]interface{}{"name": "os-disk", "dataVolume": map[string]interface{}{"name": fmt.Sprintf("pg-%s-os", p.ID)}},
 					map[string]interface{}{"name": "pgdata-disk", "dataVolume": map[string]interface{}{"name": p.DataVolumeRef}},
 					map[string]interface{}{"name": "cloudinit", "cloudInitNoCloud": map[string]interface{}{
-						"userDataSecretRef": map[string]interface{}{"name": secretName},
+						"secretRef": map[string]interface{}{"name": secretName},
 					}},
 				},
 			},
