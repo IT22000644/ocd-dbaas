@@ -17,7 +17,7 @@ spec:
   port: 5432
   masterUsername: orders_admin
   manageMasterUserPassword: true     # auto-generate and store in K8s Secret
-  allocatedStorage: 100              # 100 GiB LUKS-encrypted block storage
+  allocatedStorage: 20               # 20 GiB LUKS-encrypted block storage
   storageType: longhorn
   dbSubnetGroupName: "10.50.0.0/24"  # consumer VLAN for app access
   vpcPeering:                          # peer with RKE2 cluster VPC
@@ -25,26 +25,12 @@ spec:
     remoteSubnet: rke2-cluster-subnet  # subnet in the RKE2 VPC
   backupRetentionPeriod: 7           # daily backups, 7-day retention
   preferredBackupWindow: "02:00-03:00"
-  deletionProtection: true
+  deletionProtection: false          # disabled for easy test iteration
   running: true
   osImage: ubuntu-22.04-server-cloudimg-amd64.img
   tags:
     environment: production
     team: orders-service
----
-# Sample: Small dev database (no backups, no deletion protection)
-apiVersion: dbaas.wso2.com/v1alpha1
-kind: DBInstance
-metadata:
-  name: analytics-dev
-spec:
-  dbInstanceClass: db.t3.medium     # 2 CPU, 4GB RAM
-  allocatedStorage: 20
-  dbName: analytics
-  backupRetentionPeriod: 0          # backups disabled
-  deletionProtection: false
-  tags:
-    environment: development
 ---
 # Sample: Stop a database (preserves storage, saves compute)
 # kubectl patch dbi analytics-dev --type merge -p '{"spec":{"running":false}}'
