@@ -1,0 +1,69 @@
+# External test VPC for verifying DBaaS VPC isolation.
+#
+# Provisions a standalone Kube-OVN VPC with its own subnet, NAD, and a
+# pgtest pod. The pod tries to reach orders-prod (10.227.122.3:5432).
+#
+# Expected result: the connection TIMES OUT — Kube-OVN VPCs are isolated
+# by default, and the DBaaS subnet only allows traffic from the consumer
+# VLAN listed in DBInstance.spec.dbSubnetGroupName ("10.50.0.0/24"),
+# which is enforced at the dbaas VPC's subnet, not at routing.
+#
+# Apply:
+#   kubectl create namespace test-external || true
+#   kubectl apply -f config/samples/test-vpc.yaml
+#   kubectl wait pod/pgtest-external -n test-external --for=condition=Ready --timeout=60s
+#
+# Test (will time out — expected):
+#   kubectl exec -n test-external pgtest-external -- nc -zvw5 10.227.122.3 5432
+#
+# Cleanup:
+#   kubectl delete -f config/samples/test-vpc.yaml
+#   kubectl delete namespace test-external
+---
+apiVersion: kubeovn.io/v1
+kind: Vpc
+metadata:
+  name: test-external-vpc
+spec:
+  namespaces:
+  - test-external
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: test-external-nad
+  namespace: test-external
+  labels:
+    network.harvesterhci.io/type: OverlayNetwork
+    network.harvesterhci.io/clusternetwork: mgmt
+    network.harvesterhci.io/ready: "true"
+spec:
+  config: '{"cniVersion":"0.3.1","type":"kube-ovn","server_socket":"/run/openvswitch/kube-ovn-daemon.sock","provider":"test-external-nad.test-external.ovn"}'
+---
+apiVersion: kubeovn.io/v1
+kind: Subnet
+metadata:
+  name: test-external-subnet
+spec:
+  vpc: test-external-vpc
+  provider: test-external-nad.test-external.ovn
+  cidrBlock: 10.99.0.0/24
+  gateway: 10.99.0.1
+  protocol: IPv4
+  namespaces:
+  - test-external
+  private: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pgtest-external
+  namespace: test-external
+  annotations:
+    k8s.v1.cni.cncf.io/networks: test-external/test-external-nad
+spec:
+  restartPolicy: Never
+  containers:
+  - name: pg
+    image: postgres:16
+    command: ["sleep", "3600"]
