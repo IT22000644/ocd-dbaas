@@ -1,0 +1,30 @@
+# Test client for orders-prod DBInstance.
+#
+# Attaches to the same Kube-OVN NAD as the database VM, so it can reach
+# the DB endpoint inside the DBaaS VPC without VPC peering or routing.
+#
+# Apply with: kubectl apply -f config/samples/pgtest-pod.yaml
+#
+# Then connect:
+#   PGPASSWORD=$(kubectl get secret pg-orders-prod-credentials \
+#     -n dbaas-orders-prod -o jsonpath='{.data.admin_password}' | base64 -d)
+#   kubectl exec -it pgtest -n dbaas-orders-prod -- \
+#     env PGPASSWORD="$PGPASSWORD" \
+#     psql "host=10.227.122.3 port=5432 dbname=orders user=orders_admin sslmode=require" \
+#     -c "SELECT version();"
+#
+# Cleanup: kubectl delete -f config/samples/pgtest-pod.yaml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pgtest
+  namespace: dbaas-orders-prod
+  annotations:
+    k8s.v1.cni.cncf.io/networks: dbaas-orders-prod/dbaas-orders-prod-nad
+spec:
+  restartPolicy: Never
+  containers:
+  - name: pg
+    image: postgres:16
+    command: ["sleep", "3600"]
