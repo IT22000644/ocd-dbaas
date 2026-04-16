@@ -172,8 +172,10 @@ func (c *Client) CreateDataVolume(ctx context.Context, id, ns string, sizeGB int
 	_ = unstructured.SetNestedField(dv.Object, fmt.Sprintf("%dGi", sizeGB), "spec", "pvc", "resources", "requests", "storage")
 	_ = unstructured.SetNestedField(dv.Object, storageClass, "spec", "pvc", "storageClassName")
 
-	_, err := c.Dynamic.Resource(dvGVR).Namespace(ns).Create(ctx, dv, metav1.CreateOptions{})
-	return dvName, err
+	if _, e := c.Dynamic.Resource(dvGVR).Namespace(ns).Create(ctx, dv, metav1.CreateOptions{}); e != nil {
+		return dvName, ignoreAlreadyExists(e)
+	}
+	return dvName, nil
 }
 
 func (c *Client) ResizeDataVolume(ctx context.Context, ns, dvName string, newSizeGB int) error {
@@ -212,8 +214,10 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 		"luks_key":          luksKey,
 		"userdata":          cloudInit, // referenced by VM spec; avoids plain-text in VM CR
 	}, "stringData")
-	if _, err = c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
-		return
+	if _, e := c.Dynamic.Resource(secretGVR).Namespace(p.Namespace).Create(ctx, secret, metav1.CreateOptions{}); e != nil {
+		if err = ignoreAlreadyExists(e); err != nil {
+			return
+		}
 	}
 
 	// Build VirtualMachine CR
@@ -281,7 +285,9 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 	}
 	_ = unstructured.SetNestedField(vm.Object, spec, "spec")
 
-	_, err = c.Dynamic.Resource(vmGVR).Namespace(p.Namespace).Create(ctx, vm, metav1.CreateOptions{})
+	if _, e := c.Dynamic.Resource(vmGVR).Namespace(p.Namespace).Create(ctx, vm, metav1.CreateOptions{}); e != nil {
+		err = ignoreAlreadyExists(e)
+	}
 	return
 }
 
