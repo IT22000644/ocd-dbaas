@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dbaas-controller
+  namespace: dbaas-system
+  labels:
+    app: dbaas-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dbaas-controller
+  template:
+    metadata:
+      labels:
+        app: dbaas-controller
+    spec:
+      serviceAccountName: dbaas-controller
+      securityContext:
+        runAsNonRoot: true
+      containers:
+      - name: controller
+        image: wso2vick/ocd-dbaas:v0.1.0
+        imagePullPolicy: IfNotPresent
+        args:
+        - --gateway-address=:8080
+        - --metrics-bind-address=:8081
+        - --health-probe-bind-address=:8082
+        ports:
+        - name: gateway
+          containerPort: 8080
+        - name: metrics
+          containerPort: 8081
+        - name: health
+          containerPort: 8082
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dbaas-gateway
+  namespace: dbaas-system
+  labels:
+    app: dbaas-controller
+spec:
+  selector:
+    app: dbaas-controller
+  ports:
+  - name: http
+    port: 8080
+    targetPort: gateway
+  - name: metrics
+    port: 8081
+    targetPort: metrics
