@@ -324,13 +324,17 @@ func (r *DBInstanceReconciler) phaseVpcPeering(ctx context.Context, inst *dbaasv
 		inst.Spec.VpcPeering.RemoteSubnet,
 	)
 	if err != nil {
-		return r.fail(ctx, inst, "VpcPeeringFailed", err)
+		// Non-fatal: clusters without the Kube-OVN VpcPeering CRD (the common
+		// case on stock Harvester) shouldn't block the database from going
+		// Available. Log it and advance.
+		log.FromContext(ctx).Error(err, "VPC peering setup failed (non-fatal)")
+		inst.Status.Message = fmt.Sprintf("Available (VPC peering skipped: %v)", err)
+	} else {
+		inst.Status.Resources.VpcPeeringName = peeringName
+		inst.Status.Message = "VPC peering established"
 	}
 
-	inst.Status.Resources.VpcPeeringName = peeringName
 	inst.Status.ProvisioningPhase = dbaasv1.PhaseVpcPeeringCreated
-	inst.Status.Message = "VPC peering established"
-
 	return r.advance(ctx, inst)
 }
 
