@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"hash/fnv"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,6 +50,9 @@ var (
 	}
 	vpcPeeringGVR = schema.GroupVersionResource{
 		Group: "kubeovn.io", Version: "v1", Resource: "vpc-peerings",
+	}
+	vmImageGVR = schema.GroupVersionResource{
+		Group: "harvesterhci.io", Version: "v1beta1", Resource: "virtualmachineimages",
 	}
 )
 
@@ -192,6 +196,55 @@ func (c *Client) ResizeDataVolume(ctx context.Context, ns, dvName string, newSiz
 // VM: KubeVirt VirtualMachine + cloud-init + credentials Secret
 // ============================================================
 
+// resolveVMImage maps a user-supplied image reference to the underlying
+// Harvester VirtualMachineImage and its image-managed StorageClass.
+//
+// The reference accepts:
+//   - "<name>"           — looked up in the "default" namespace
+//   - "<ns>/<name>"      — explicit namespace
+//   - "<displayName>"    — fall-back search by VirtualMachineImage.spec.displayName
+//
+// Returns the resolved namespace, VMImage name, and StorageClass that the
+// DataVolume must use. The DataVolume should also carry annotation
+// harvesterhci.io/imageId=<ns>/<name>.
+func (c *Client) resolveVMImage(ctx context.Context, ref string) (ns, name, sc string, err error) {
+	ns, spec := "default", ref
+	if i := strings.Index(ref, "/"); i > 0 {
+		ns, spec = ref[:i], ref[i+1:]
+	}
+
+	if img, e := c.Dynamic.Resource(vmImageGVR).Namespace(ns).Get(ctx, spec, metav1.GetOptions{}); e == nil {
+		name = spec
+		sc, _, _ = unstructured.NestedString(img.Object, "status", "storageClassName")
+		if sc == "" {
+			err = fmt.Errorf("VirtualMachineImage %s/%s has no status.storageClassName yet (image not ready)", ns, name)
+		}
+		return
+	} else if !apierrors.IsNotFound(e) {
+		err = e
+		return
+	}
+
+	list, e := c.Dynamic.Resource(vmImageGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
+	if e != nil {
+		err = e
+		return
+	}
+	for _, item := range list.Items {
+		dn, _, _ := unstructured.NestedString(item.Object, "spec", "displayName")
+		if dn == spec {
+			name = item.GetName()
+			sc, _, _ = unstructured.NestedString(item.Object, "status", "storageClassName")
+			if sc == "" {
+				err = fmt.Errorf("VirtualMachineImage %s/%s (displayName=%s) has no status.storageClassName yet", ns, name, spec)
+			}
+			return
+		}
+	}
+	err = fmt.Errorf("no VirtualMachineImage in namespace %s matching name or displayName %q", ns, spec)
+	return
+}
+
 func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName, secretName string, err error) {
 	vmName = fmt.Sprintf("pg-%s", p.ID)
 	secretName = fmt.Sprintf("pg-%s-credentials", p.ID)
@@ -220,6 +273,13 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 		}
 	}
 
+	// Resolve the Harvester VirtualMachineImage so the OS DataVolume can use
+	// the image-managed StorageClass (no cross-namespace PVC clone, no extra RBAC).
+	imgNs, imgName, imgSC, err := c.resolveVMImage(ctx, p.OSImage)
+	if err != nil {
+		return
+	}
+
 	// Build VirtualMachine CR
 	vm := newUnstructured("kubevirt.io/v1", "VirtualMachine", vmName, p.Namespace)
 	vm.SetLabels(map[string]string{dbaasv1.LabelInstance: p.ID, dbaasv1.LabelRole: "primary"})
@@ -230,14 +290,20 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 			map[string]interface{}{
 				"apiVersion": "cdi.kubevirt.io/v1beta1",
 				"kind":       "DataVolume",
-				"metadata":   map[string]interface{}{"name": fmt.Sprintf("pg-%s-os", p.ID)},
+				"metadata": map[string]interface{}{
+					"name": fmt.Sprintf("pg-%s-os", p.ID),
+					"annotations": map[string]interface{}{
+						"harvesterhci.io/imageId": fmt.Sprintf("%s/%s", imgNs, imgName),
+					},
+				},
 				"spec": map[string]interface{}{
 					"source": map[string]interface{}{
-						"pvc": map[string]interface{}{"namespace": "default", "name": p.OSImage},
+						"blank": map[string]interface{}{},
 					},
 					"pvc": map[string]interface{}{
-						"accessModes":      []interface{}{"ReadWriteOnce"},
-						"storageClassName": "longhorn",
+						"accessModes":      []interface{}{"ReadWriteMany"},
+						"volumeMode":       "Block",
+						"storageClassName": imgSC,
 						"resources": map[string]interface{}{
 							"requests": map[string]interface{}{"storage": "20Gi"},
 						},
