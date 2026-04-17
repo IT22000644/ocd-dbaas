@@ -81,6 +81,10 @@ type DBInstanceSpec struct {
 	// OSImage is the Harvester VM image name. Default "ubuntu-22.04-server-cloudimg-amd64.img".
 	OSImage string `json:"osImage,omitempty"`
 
+	// VMPassword sets the default console/SSH password for the VM user (ubuntu).
+	// For development and debugging only — leave empty in production.
+	VMPassword string `json:"vmPassword,omitempty"`
+
 	// S3BackupConfig for pgBackRest S3 target.
 	S3BackupConfig *S3BackupConfig `json:"s3BackupConfig,omitempty"`
 

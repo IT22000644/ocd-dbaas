@@ -14,8 +14,17 @@ func buildCloudInit(p VMCreateParams, adminPw, replPw, exporterPw, luksKey strin
 		)
 	}
 
+	vmUserBlock := ""
+	if p.VMPassword != "" {
+		vmUserBlock = fmt.Sprintf(`password: %s
+chpasswd:
+  expire: false
+ssh_pwauth: true
+`, p.VMPassword)
+	}
+
 	return fmt.Sprintf(`#cloud-config
-package_update: true
+%spackage_update: true
 packages:
   - postgresql
   - postgresql-contrib
@@ -72,6 +81,7 @@ runcmd:
   - /etc/dbaas/bootstrap.sh
 final_message: "DBaaS bootstrap complete for %s"
 `,
+		vmUserBlock,
 		p.ID,
 		p.DBName,
 		p.Port,

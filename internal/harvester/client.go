@@ -85,6 +85,7 @@ type VMCreateParams struct {
 	BackupEnabled  bool
 	BackupWindow   string
 	S3Config       *dbaasv1.S3BackupConfig
+	VMPassword     string
 }
 
 // VMIReadiness bundles phase, IP, and postgres-readiness from a single VMI fetch.
