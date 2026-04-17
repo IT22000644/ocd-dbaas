@@ -330,11 +330,16 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 							map[string]interface{}{"name": "cloudinit", "disk": map[string]interface{}{"bus": "virtio"}},
 						},
 						"interfaces": []interface{}{
-							map[string]interface{}{"name": "vpc-net", "bridge": map[string]interface{}{}},
+							map[string]interface{}{"name": "mgmt-net", "masquerade": map[string]interface{}{}},
+						map[string]interface{}{"name": "vpc-net", "bridge": map[string]interface{}{}},
 						},
 					},
 				},
 				"networks": []interface{}{
+					map[string]interface{}{
+						"name": "mgmt-net",
+						"pod":  map[string]interface{}{},
+					},
 					map[string]interface{}{
 						"name":   "vpc-net",
 						"multus": map[string]interface{}{"networkName": fmt.Sprintf("%s/%s", p.Namespace, p.NADName)},
