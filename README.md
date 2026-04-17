@@ -453,52 +453,109 @@ kubectl delete dbi orders-prod
 
 ### Network Topology
 
-The following diagram shows how a single database instance is placed inside its own Kube-OVN VPC and subnet, while an external consumer VLAN is allowed to connect to PostgreSQL.
+Each database instance is placed inside its own Kube-OVN VPC with two NICs: a management NIC on the pod network (for internet access and monitoring) and an isolated VPC NIC (for database traffic). An external consumer VLAN is explicitly allowed through `allowSubnets`.
 
 ```
-Application / client workloads
-Consumer VLAN / CIDR from `DBSubnetGroupName`
-Example: 10.50.0.0/24
-                 │
-                 │ PostgreSQL traffic to TCP/5432
-                 │
-                 ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ Kube-OVN VPC: dbaas-orders-prod-vpc                                │
-│ Static route allows traffic from the consumer VLAN into the VPC    │
-│ Namespaces attached to this VPC: [dbaas-orders-prod]               │
-│                                                                     │
-│  ┌───────────────────────────────────────────────────────────────┐  │
-│  │ Kube-OVN Subnet: dbaas-orders-prod-subnet                    │  │
-│  │ CIDR: 10.100.X.0/24                                          │  │
-│  │ Gateway: 10.100.X.1                                           │  │
-│  │ allowSubnets: [10.50.0.0/24]                                  │  │
-│  │                                                               │  │
-│  │  Namespace: dbaas-orders-prod                                 │  │
-│  │                                                               │  │
-│  │  ┌─────────────────────────────────────────────────────────┐  │  │
-│  │  │ NetworkAttachmentDefinition: dbaas-orders-prod-nad     │  │  │
-│  │  │ Multus / Kube-OVN attachment into the subnet           │  │  │
-│  │  └─────────────────────────────────────────────────────────┘  │  │
-│  │                                                               │  │
-│  │  ┌─────────────────────────────────────────────────────────┐  │  │
-│  │  │ KubeVirt VM: pg-orders-prod                            │  │  │
-│  │  │ NIC: vpc-net                                           │  │  │
-│  │  │ IP: 10.100.X.Y                                         │  │  │
-│  │  │ PostgreSQL listens on port 5432                        │  │  │
-│  │  │ PGDATA stored on encrypted CDI DataVolume              │  │  │
-│  │  └─────────────────────────────────────────────────────────┘  │  │
-│  └───────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  Harvester 1.7.1 Cluster                                                        │
+│                                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐                  │
+│  │  Namespace: dbaas-system                                  │                  │
+│  │                                                           │                  │
+│  │  ┌─────────────────────────────────────────────────────┐  │                  │
+│  │  │  dbaas-controller Pod                                │  │                  │
+│  │  │  :8080 REST Gateway  ◄── kubectl / curl             │  │                  │
+│  │  │  :8081 Metrics       ◄── Prometheus scrape           │  │                  │
+│  │  │  :8082 Health probes ◄── kubelet liveness/readiness  │  │                  │
+│  │  │  Watches: DBInstance CRDs (etcd)                     │  │                  │
+│  │  │  Creates: VPC, Subnet, NAD, DV, VM, Secret, SM      │  │                  │
+│  │  └─────────────────────────────────────────────────────┘  │                  │
+│  └───────────────────────────────────────────────────────────┘                  │
+│         │                                                                       │
+│         │ Reconcile loop (one phase per iteration)                              │
+│         ▼                                                                       │
+│  ┌──────────────────────────────────────────────────────────────────────────┐   │
+│  │  Kube-OVN VPC: dbaas-orders-prod-vpc                                     │   │
+│  │  staticRoutes: [{cidr: "10.50.0.0/24", nextHop: autodetect}]            │   │
+│  │                                                                          │   │
+│  │  ┌────────────────────────────────────────────────────────────────────┐  │   │
+│  │  │  Kube-OVN Subnet: dbaas-orders-prod-subnet                        │  │   │
+│  │  │  CIDR: 10.227.122.0/24    Gateway: 10.227.122.1                   │  │   │
+│  │  │  provider: dbaas-orders-prod-nad.dbaas-orders-prod.ovn            │  │   │
+│  │  │  private: true    allowSubnets: ["10.50.0.0/24"]                  │  │   │
+│  │  │                                                                    │  │   │
+│  │  │  Namespace: dbaas-orders-prod                                      │  │   │
+│  │  │  ┌──────────────────────────────────────────────────────────────┐  │  │   │
+│  │  │  │  NAD: dbaas-orders-prod-nad                                  │  │  │   │
+│  │  │  │  Labels: type=OverlayNetwork, clusternetwork=mgmt            │  │  │   │
+│  │  │  └──────────────────────────────────────────────────────────────┘  │  │   │
+│  │  │                                                                    │  │   │
+│  │  │  ┌──────────────────────────────────────────────────────────────┐  │  │   │
+│  │  │  │  KubeVirt VM: pg-orders-prod                                 │  │  │   │
+│  │  │  │                                                              │  │  │   │
+│  │  │  │  NIC 1: mgmt-net (pod network, masquerade)                  │  │  │   │
+│  │  │  │    IP: 10.52.1.160  ◄── internet, apt, DNS, monitoring      │  │  │   │
+│  │  │  │                                                              │  │  │   │
+│  │  │  │  NIC 2: vpc-net (Kube-OVN bridge via NAD)                   │  │  │   │
+│  │  │  │    IP: 10.227.122.3 ◄── PostgreSQL application traffic      │  │  │   │
+│  │  │  │                                                              │  │  │   │
+│  │  │  │  ┌────────────────────────────────────────────────────────┐  │  │  │   │
+│  │  │  │  │  PostgreSQL 14                                         │  │  │  │   │
+│  │  │  │  │  listen_addresses = '*'    port = 5432                 │  │  │  │   │
+│  │  │  │  │  DB: orders    User: orders_admin                      │  │  │  │   │
+│  │  │  │  │  pg_hba: host all all 0.0.0.0/0 scram-sha-256         │  │  │  │   │
+│  │  │  │  └────────────────────────────────────────────────────────┘  │  │  │   │
+│  │  │  │                                                              │  │  │   │
+│  │  │  │  Disks:                                                      │  │  │   │
+│  │  │  │    os-disk  ← DV: pg-orders-prod-os  (20Gi, image clone)    │  │  │   │
+│  │  │  │    pgdata   ← DV: pg-orders-prod-data (20Gi, Longhorn)      │  │  │   │
+│  │  │  │    cloudinit ← Secret: pg-orders-prod-credentials           │  │  │   │
+│  │  │  └──────────────────────────────────────────────────────────────┘  │  │   │
+│  │  │                                                                    │  │   │
+│  │  │  ┌──────────────────────────────────────────────────────────────┐  │  │   │
+│  │  │  │  Monitoring                                                  │  │  │   │
+│  │  │  │  Service: pg-orders-prod-metrics (ClusterIP: None, :9187)    │  │  │   │
+│  │  │  │  ServiceMonitor: pg-orders-prod-monitor (15s scrape)         │  │  │   │
+│  │  │  └──────────────────────────────────────────────────────────────┘  │  │   │
+│  │  └────────────────────────────────────────────────────────────────────┘  │   │
+│  └──────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                 │
+│  ═══════════════════════  VPC Boundary (isolated)  ═══════════════════════════  │
+│                                                                                 │
+│  ┌──────────────────────────────────────────────────────────────────────────┐   │
+│  │  Consumer VLAN: 10.50.0.0/24 (from spec.dbSubnetGroupName)              │   │
+│  │                                                                          │   │
+│  │  Application pods / RKE2 workloads connect to:                          │   │
+│  │    jdbc:postgresql://10.227.122.3:5432/orders?ssl=true                   │   │
+│  │                                                                          │   │
+│  │  Traffic allowed via:                                                    │   │
+│  │    subnet.spec.allowSubnets + VPC static route                          │   │
+│  └──────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                 │
+│  ═══════════════════════  Isolation Test  ════════════════════════════════════  │
+│                                                                                 │
+│  ┌──────────────────────────────────────────────────────────────────────────┐   │
+│  │  test-external-vpc (10.99.0.0/24)                                       │   │
+│  │  pgtest-external pod → nc 10.227.122.3:5432 → TIMEOUT ✗                │   │
+│  │  (not in allowSubnets — VPC isolation blocks traffic)                   │   │
+│  └──────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                 │
+│  ┌──────────────────────────────────────────────────────────────────────────┐   │
+│  │  Same VPC (dbaas-orders-prod namespace)                                  │   │
+│  │  pgtest pod → pg_isready 10.52.1.160:5432 → accepting connections ✓     │   │
+│  └──────────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Key points:
+**Data flow summary:**
 
-- Each database instance gets its own VPC, subnet, NAD, namespace, and PostgreSQL VM.
-- `DBSubnetGroupName` is used here as the external consumer VLAN or CIDR that is allowed to reach the database.
-- The VM is attached to the Kube-OVN subnet through a `NetworkAttachmentDefinition`, so the database endpoint is the VM IP inside the VPC subnet.
-- Client traffic reaches the database through the VPC route and the subnet `allowSubnets` rule, not through a public LoadBalancer.
-- Monitoring is separate from the data path: the controller can also create a metrics `Service` and `ServiceMonitor`, but application traffic goes directly to the PostgreSQL VM endpoint.
+| Path | Source → Destination | Network |
+|------|---------------------|---------|
+| App → DB | Consumer VLAN (10.50.0.0/24) → VM vpc-net (10.227.122.3:5432) | Kube-OVN VPC, allowed via `allowSubnets` |
+| Cloud-init | VM mgmt-net (10.52.1.160) → internet | Pod network (masquerade NAT) |
+| Monitoring | Prometheus → VM mgmt-net:9187 | Pod network via headless Service |
+| API | User → controller :8080 → CRD → reconciler → Harvester APIs | Cluster internal |
+| Console | Harvester UI → VM serial console (ubuntu / vmPassword) | KubeVirt subresource |
 
 ### VPC Peering
 
