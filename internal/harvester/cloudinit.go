@@ -34,11 +34,42 @@ write_files:
       MAX_CONNECTIONS=%d
       LUKS_KEY=%s
       %s
+  - path: /etc/dbaas/bootstrap.sh
+    permissions: "0700"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      source /etc/dbaas/bootstrap.env
+
+      PG_VER=$(pg_lsclusters -h | awk '{print $1}' | head -1)
+      PG_CONF="/etc/postgresql/${PG_VER}/main"
+
+      # Listen on all interfaces and set the port
+      sed -i "s/^#\?listen_addresses.*/listen_addresses = '*'/" "${PG_CONF}/postgresql.conf"
+      sed -i "s/^#\?port.*/port = ${DB_PORT}/" "${PG_CONF}/postgresql.conf"
+      sed -i "s/^#\?max_connections.*/max_connections = ${MAX_CONNECTIONS}/" "${PG_CONF}/postgresql.conf"
+
+      # Allow remote connections with scram-sha-256
+      echo "host all all 0.0.0.0/0 scram-sha-256" >> "${PG_CONF}/pg_hba.conf"
+      echo "host replication all 0.0.0.0/0 scram-sha-256" >> "${PG_CONF}/pg_hba.conf"
+
+      systemctl restart postgresql
+
+      # Create admin user and database
+      sudo -u postgres psql -p "${DB_PORT}" <<EOSQL
+      DO \$\$
+      BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${MASTER_USER}') THEN
+          CREATE ROLE ${MASTER_USER} LOGIN SUPERUSER PASSWORD '${MASTER_PASSWORD}';
+        END IF;
+      END \$\$;
+      SELECT 'CREATE DATABASE ${DB_NAME} OWNER ${MASTER_USER}'
+        WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${DB_NAME}')\gexec
+      EOSQL
 runcmd:
   - mkdir -p /var/lib/dbaas
   - chown postgres:postgres /var/lib/dbaas
-  - systemctl enable postgresql || true
-  - systemctl restart postgresql || systemctl start postgresql || true
+  - /etc/dbaas/bootstrap.sh
 final_message: "DBaaS bootstrap complete for %s"
 `,
 		p.ID,
