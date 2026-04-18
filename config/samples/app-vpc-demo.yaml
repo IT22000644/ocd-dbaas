@@ -1,0 +1,205 @@
+# Demo: Microservice in test-external-vpc accessing DBaaS via VPC peering.
+#
+# Deploys a simple web service that queries PostgreSQL through the VPC-peered
+# network and serves results over HTTP. External traffic enters via a NodePort
+# Service on the pod network; DB traffic flows through the Kube-OVN VPC peering.
+#
+# Prerequisites:
+#   1. orders-prod DBInstance is Available
+#   2. VM eth1 has an IP on 10.227.122.0/24 (configure via Harvester console)
+#   3. test-external namespace exists: kubectl create namespace test-external
+#
+# Apply:
+#   kubectl apply -f config/samples/test-vpc.yaml      # VPC + Subnet + NAD
+#   kubectl apply -f config/samples/app-vpc-demo.yaml   # Peering + App + Service
+#
+# Test:
+#   NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+#   curl http://${NODE_IP}:30432/
+#
+# Cleanup:
+#   kubectl delete -f config/samples/app-vpc-demo.yaml
+#   kubectl delete -f config/samples/test-vpc.yaml
+#   kubectl delete namespace test-external
+
+# ── Step 1: VPC Peering ──────────────────────────────────────────────────────
+# Patch both VPCs to establish peering and add cross-VPC routes.
+# NOTE: kubectl apply on VPC resources merges with existing spec. If the VPCs
+# already have other staticRoutes, use kubectl patch instead (see INSTALL.md).
+
+---
+apiVersion: kubeovn.io/v1
+kind: Vpc
+metadata:
+  name: test-external-vpc
+spec:
+  namespaces:
+  - test-external
+  vpcPeerings:
+  - remoteVpc: dbaas-orders-prod-vpc
+    localConnectIP: 169.254.0.2/30
+  staticRoutes:
+  - cidr: 10.227.122.0/24
+    nextHop: 169.254.0.1
+    policy: policyDst
+
+---
+apiVersion: kubeovn.io/v1
+kind: Vpc
+metadata:
+  name: dbaas-orders-prod-vpc
+spec:
+  namespaces:
+  - dbaas-orders-prod
+  vpcPeerings:
+  - remoteVpc: test-external-vpc
+    localConnectIP: 169.254.0.1/30
+  staticRoutes:
+  - cidr: 10.50.0.0/24
+    nextHop: autodetect
+    policy: policyDst
+  - cidr: 10.99.0.0/24
+    nextHop: 169.254.0.2
+    policy: policyDst
+
+# ── Step 2: Allow test-external subnet through DBaaS subnet ACL ──────────────
+
+---
+apiVersion: kubeovn.io/v1
+kind: Subnet
+metadata:
+  name: dbaas-orders-prod-subnet
+spec:
+  vpc: dbaas-orders-prod-vpc
+  provider: dbaas-orders-prod-nad.dbaas-orders-prod.ovn
+  cidrBlock: 10.227.122.0/24
+  gateway: 10.227.122.1
+  protocol: IPv4
+  namespaces:
+  - dbaas-orders-prod
+  private: true
+  allowSubnets:
+  - 10.50.0.0/24
+  - 10.99.0.0/24
+
+# ── Step 3: Demo microservice ────────────────────────────────────────────────
+# A lightweight web server that connects to PostgreSQL via the VPC interface
+# and serves query results over HTTP on the pod network.
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-app
+  namespace: test-external
+data:
+  app.sh: |
+    #!/bin/bash
+    set -e
+
+    DB_HOST="${DB_HOST:-10.227.122.3}"
+    DB_PORT="${DB_PORT:-5432}"
+    DB_NAME="${DB_NAME:-orders}"
+    DB_USER="${DB_USER:-orders_admin}"
+
+    echo "Starting demo app — DB at ${DB_HOST}:${DB_PORT}/${DB_NAME}"
+
+    while true; do
+      { echo -e "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r"; \
+        echo "=== DBaaS VPC Peering Demo ==="; \
+        echo "Pod: $(hostname)"; \
+        echo "Pod network (eth0): $(ip -4 -o addr show eth0 2>/dev/null | awk '{print $4}' || echo 'n/a')"; \
+        echo "VPC network (net1): $(ip -4 -o addr show net1 2>/dev/null | awk '{print $4}' || echo 'n/a')"; \
+        echo ""; \
+        echo "Connecting to ${DB_HOST}:${DB_PORT}/${DB_NAME} as ${DB_USER}..."; \
+        echo ""; \
+        if PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -p "${DB_PORT}" -U "${DB_USER}" -d "${DB_NAME}" \
+          --no-password -t -c "SELECT 'PostgreSQL ' || version();" 2>&1; then
+          echo ""; echo "Status: SUCCESS";
+        else
+          echo ""; echo "Status: FAILED";
+        fi; \
+      } | nc -l -p 8080 -q 1 || true
+    done
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app
+  namespace: test-external
+  labels:
+    app: demo-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-app
+  template:
+    metadata:
+      labels:
+        app: demo-app
+      annotations:
+        k8s.v1.cni.cncf.io/networks: test-external/test-external-nad
+    spec:
+      containers:
+      - name: app
+        image: postgres:16
+        command: ["bash", "/app/app.sh"]
+        ports:
+        - name: http
+          containerPort: 8080
+        env:
+        - name: DB_HOST
+          value: "10.227.122.3"
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_NAME
+          value: "orders"
+        - name: DB_USER
+          value: "orders_admin"
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: password
+        volumeMounts:
+        - name: app-script
+          mountPath: /app
+      volumes:
+      - name: app-script
+        configMap:
+          name: demo-app
+
+# ── Step 4: DB credentials Secret (copied from dbaas namespace) ──────────────
+# In production, use ExternalSecret or a secret-syncing operator.
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-credentials
+  namespace: test-external
+type: Opaque
+stringData:
+  password: "REPLACE_WITH_ACTUAL_PASSWORD"
+
+# ── Step 5: NodePort Service for external access ─────────────────────────────
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-app
+  namespace: test-external
+  labels:
+    app: demo-app
+spec:
+  type: NodePort
+  selector:
+    app: demo-app
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+    nodePort: 30432
