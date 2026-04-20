@@ -43,6 +43,17 @@ write_files:
       MAX_CONNECTIONS=%d
       LUKS_KEY=%s
       %s
+  - path: /etc/netplan/60-vpc-net.yaml
+    permissions: "0600"
+    content: |
+      network:
+        version: 2
+        ethernets:
+          enp2s0:
+            dhcp4: true
+            dhcp4-overrides:
+              use-routes: true
+              route-metric: 200
   - path: /etc/dbaas/bootstrap.sh
     permissions: "0700"
     content: |
@@ -76,6 +87,7 @@ write_files:
         WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${DB_NAME}')\gexec
       EOSQL
 runcmd:
+  - netplan apply
   - mkdir -p /var/lib/dbaas
   - chown postgres:postgres /var/lib/dbaas
   - /etc/dbaas/bootstrap.sh

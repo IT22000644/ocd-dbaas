@@ -142,6 +142,7 @@ func (c *Client) CreateVPCNetwork(ctx context.Context, id, ns, consumerVLAN stri
 	_ = unstructured.SetNestedField(subnet.Object, "IPv4", "spec", "protocol")
 	_ = unstructured.SetNestedSlice(subnet.Object, []interface{}{ns}, "spec", "namespaces")
 	_ = unstructured.SetNestedField(subnet.Object, true, "spec", "private")
+	_ = unstructured.SetNestedField(subnet.Object, true, "spec", "enableDHCP")
 	_ = unstructured.SetNestedSlice(subnet.Object, []interface{}{consumerVLAN}, "spec", "allowSubnets")
 	if _, e := c.Dynamic.Resource(subnetGVR).Create(ctx, subnet, metav1.CreateOptions{}); e != nil {
 		if err = ignoreAlreadyExists(e); err != nil {
