@@ -103,6 +103,9 @@ data:
     apt-get update -qq >/dev/null 2>&1
     apt-get install -y -qq netcat-openbsd iproute2 >/dev/null 2>&1
 
+    # Route DB traffic through the VPC-peered interface (net1)
+    ip route add 10.227.122.0/24 via 10.99.0.1 dev net1 2>/dev/null || true
+
     echo "Starting demo app — DB at ${DB_HOST}:${DB_PORT}/${DB_NAME}"
 
     while true; do
@@ -147,6 +150,9 @@ spec:
       - name: app
         image: postgres:16
         command: ["bash", "/app/app.sh"]
+        securityContext:
+          capabilities:
+            add: ["NET_ADMIN"]
         ports:
         - name: http
           containerPort: 8080
