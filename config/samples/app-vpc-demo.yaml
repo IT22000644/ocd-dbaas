@@ -40,7 +40,7 @@ spec:
     localConnectIP: 169.254.0.2/30
   staticRoutes:
   - cidr: 10.227.122.0/24
-    nextHop: 169.254.0.1
+    nextHopIP: 169.254.0.1
     policy: policyDst
 
 ---
@@ -56,10 +56,10 @@ spec:
     localConnectIP: 169.254.0.1/30
   staticRoutes:
   - cidr: 10.50.0.0/24
-    nextHop: autodetect
+    nextHopIP: autodetect
     policy: policyDst
   - cidr: 10.99.0.0/24
-    nextHop: 169.254.0.2
+    nextHopIP: 169.254.0.2
     policy: policyDst
 
 # ── Step 2: Allow test-external subnet through DBaaS subnet ACL ──────────────

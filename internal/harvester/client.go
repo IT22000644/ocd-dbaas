@@ -153,7 +153,7 @@ func (c *Client) CreateVPCNetwork(ctx context.Context, id, ns, consumerVLAN stri
 	if created != nil {
 		routes, _, _ := unstructured.NestedSlice(created.Object, "spec", "staticRoutes")
 		routes = append(routes, map[string]interface{}{
-			"cidr": consumerVLAN, "nextHop": "autodetect", "policy": "policyDst",
+			"cidr": consumerVLAN, "nextHopIP": "autodetect", "policy": "policyDst",
 		})
 		_ = unstructured.SetNestedSlice(created.Object, routes, "spec", "staticRoutes")
 		_, _ = c.Dynamic.Resource(vpcGVR).Update(ctx, created, metav1.UpdateOptions{})
