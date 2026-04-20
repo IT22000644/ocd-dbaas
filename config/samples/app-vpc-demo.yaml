@@ -99,6 +99,10 @@ data:
     DB_NAME="${DB_NAME:-orders}"
     DB_USER="${DB_USER:-orders_admin}"
 
+    echo "Installing dependencies..."
+    apt-get update -qq >/dev/null 2>&1
+    apt-get install -y -qq netcat-openbsd iproute2 >/dev/null 2>&1
+
     echo "Starting demo app — DB at ${DB_HOST}:${DB_PORT}/${DB_NAME}"
 
     while true; do
