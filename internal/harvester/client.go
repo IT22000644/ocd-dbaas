@@ -83,9 +83,10 @@ type VMCreateParams struct {
 	Port           int
 	MaxConnections int
 	BackupEnabled  bool
-	BackupWindow   string
-	S3Config       *dbaasv1.S3BackupConfig
-	VMPassword     string
+	BackupWindow    string
+	S3Config        *dbaasv1.S3BackupConfig
+	VMPassword      string
+	ConsumerNetwork string
 }
 
 // VMIReadiness bundles phase, IP, and postgres-readiness from a single VMI fetch.
@@ -330,22 +331,10 @@ func (c *Client) CreatePostgresVM(ctx context.Context, p VMCreateParams) (vmName
 							map[string]interface{}{"name": "pgdata-disk", "disk": map[string]interface{}{"bus": "virtio"}},
 							map[string]interface{}{"name": "cloudinit", "disk": map[string]interface{}{"bus": "virtio"}},
 						},
-						"interfaces": []interface{}{
-							map[string]interface{}{"name": "mgmt-net", "masquerade": map[string]interface{}{}},
-						map[string]interface{}{"name": "vpc-net", "bridge": map[string]interface{}{}},
-						},
+						"interfaces": vmInterfaces(p.ConsumerNetwork),
 					},
 				},
-				"networks": []interface{}{
-					map[string]interface{}{
-						"name": "mgmt-net",
-						"pod":  map[string]interface{}{},
-					},
-					map[string]interface{}{
-						"name":   "vpc-net",
-						"multus": map[string]interface{}{"networkName": fmt.Sprintf("%s/%s", p.Namespace, p.NADName)},
-					},
-				},
+				"networks": vmNetworks(p.Namespace, p.NADName, p.ConsumerNetwork),
 				"volumes": []interface{}{
 					map[string]interface{}{"name": "os-disk", "dataVolume": map[string]interface{}{"name": fmt.Sprintf("pg-%s-os", p.ID)}},
 					map[string]interface{}{"name": "pgdata-disk", "dataVolume": map[string]interface{}{"name": p.DataVolumeRef}},
@@ -522,6 +511,37 @@ func (c *Client) TeardownAll(ctx context.Context, id, ns string, refs dbaasv1.Re
 // ============================================================
 // Helpers
 // ============================================================
+
+func vmInterfaces(consumerNetwork string) []interface{} {
+	ifaces := []interface{}{
+		map[string]interface{}{"name": "mgmt-net", "masquerade": map[string]interface{}{}},
+		map[string]interface{}{"name": "vpc-net", "bridge": map[string]interface{}{}},
+	}
+	if consumerNetwork != "" {
+		ifaces = append(ifaces, map[string]interface{}{"name": "consumer-net", "bridge": map[string]interface{}{}})
+	}
+	return ifaces
+}
+
+func vmNetworks(namespace, nadName, consumerNetwork string) []interface{} {
+	nets := []interface{}{
+		map[string]interface{}{
+			"name": "mgmt-net",
+			"pod":  map[string]interface{}{},
+		},
+		map[string]interface{}{
+			"name":   "vpc-net",
+			"multus": map[string]interface{}{"networkName": fmt.Sprintf("%s/%s", namespace, nadName)},
+		},
+	}
+	if consumerNetwork != "" {
+		nets = append(nets, map[string]interface{}{
+			"name":   "consumer-net",
+			"multus": map[string]interface{}{"networkName": consumerNetwork},
+		})
+	}
+	return nets
+}
 
 func newUnstructured(apiVersion, kind, name, namespace string) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{

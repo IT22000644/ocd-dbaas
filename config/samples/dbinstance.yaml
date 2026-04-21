@@ -27,6 +27,7 @@ spec:
   preferredBackupWindow: "02:00-03:00"
   deletionProtection: false          # disabled for easy test iteration
   running: true
+  consumerNetwork: default/vm-net-100             # Harvester VLAN NAD for L2 access from app clusters
   vmPassword: dbaas-dev                          # VM console/SSH password (dev only)
   osImage: ubuntu-22.04-server-cloudimg-amd64.img
   tags:

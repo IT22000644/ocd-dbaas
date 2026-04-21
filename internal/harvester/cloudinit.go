@@ -14,6 +14,16 @@ func buildCloudInit(p VMCreateParams, adminPw, replPw, exporterPw, luksKey strin
 		)
 	}
 
+	consumerNetplan := ""
+	if p.ConsumerNetwork != "" {
+		consumerNetplan = `
+          enp3s0:
+            dhcp4: true
+            dhcp4-overrides:
+              use-routes: true
+              route-metric: 300`
+	}
+
 	vmUserBlock := ""
 	if p.VMPassword != "" {
 		vmUserBlock = fmt.Sprintf(`password: %s
@@ -53,7 +63,7 @@ write_files:
             dhcp4: true
             dhcp4-overrides:
               use-routes: true
-              route-metric: 200
+              route-metric: 200%s
   - path: /etc/dbaas/bootstrap.sh
     permissions: "0700"
     content: |
@@ -104,6 +114,7 @@ final_message: "DBaaS bootstrap complete for %s"
 		p.MaxConnections,
 		luksKey,
 		backupConfig,
+		consumerNetplan,
 		p.ID,
 	)
 }
