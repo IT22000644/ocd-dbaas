@@ -1,0 +1,116 @@
+# Private DB access bundle for application namespaces.
+#
+# Creates a Service + Endpoints + Secret + NetworkPolicy in the target
+# namespace so pods can reach the DBaaS PostgreSQL via a stable DNS name
+# (orders-db:5432) without knowing the underlying VM IP.
+#
+# kube-proxy handles NAT from the pod network to the VLAN endpoint
+# automatically — no host-network or special CNI config needed.
+#
+# Usage:
+#   # Set the actual DB password
+#   PGPW="<password from Harvester cluster>"
+#
+#   # Apply to each namespace that needs access
+#   kubectl create namespace my-app
+#   sed "s/REPLACE_WITH_PASSWORD/$PGPW/" config/samples/db-access.yaml | kubectl apply -n my-app -f -
+#
+#   # Test
+#   kubectl run pgtest -n my-app --image=postgres:16 --command -- sleep 3600
+#   kubectl wait pod/pgtest -n my-app --for=condition=Ready --timeout=60s
+#   kubectl exec -it pgtest -n my-app -- env PGPASSWORD="$PGPW" \
+#     psql "host=orders-db port=5432 dbname=orders user=orders_admin sslmode=require" \
+#     -c "SELECT version();"
+#
+# Cleanup:
+#   kubectl delete -n my-app -f config/samples/db-access.yaml
+#
+# NOTE: Update the Endpoints IP (172.22.100.9) to match your DB VM's
+# consumer VLAN address. Get it from: kubectl get dbi orders-prod -o jsonpath='{.status.endpoint.address}'
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-db
+  labels:
+    app.kubernetes.io/managed-by: dbaas
+    dbaas.wso2.com/instance: orders-prod
+spec:
+  type: ClusterIP
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: 5432
+
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: orders-db
+  labels:
+    app.kubernetes.io/managed-by: dbaas
+    dbaas.wso2.com/instance: orders-prod
+subsets:
+- addresses:
+  - ip: 172.22.100.9
+  ports:
+  - name: postgres
+    port: 5432
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orders-db-credentials
+  labels:
+    app.kubernetes.io/managed-by: dbaas
+    dbaas.wso2.com/instance: orders-prod
+type: Opaque
+stringData:
+  host: "orders-db"
+  port: "5432"
+  dbname: "orders"
+  username: "orders_admin"
+  password: "REPLACE_WITH_PASSWORD"
+  jdbc-url: "jdbc:postgresql://orders-db:5432/orders?sslmode=require"
+
+---
+# Restrict DB access to pods with the label dbaas-client=orders-db.
+# Pods without this label in the same namespace cannot connect.
+#
+# To grant access to a pod:
+#   labels:
+#     dbaas-client: orders-db
+#
+# To disable this restriction, delete this NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orders-db-access
+  labels:
+    app.kubernetes.io/managed-by: dbaas
+    dbaas.wso2.com/instance: orders-prod
+spec:
+  podSelector:
+    matchLabels:
+      dbaas-client: orders-db
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 172.22.100.9/32
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
