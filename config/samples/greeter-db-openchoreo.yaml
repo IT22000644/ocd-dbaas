@@ -1,0 +1,74 @@
+# Deploy greeter-db through the OpenChoreo workflow.
+#
+# Creates a Component + Workload. OpenChoreo auto-creates the
+# ComponentRelease, ReleaseBinding, Deployment, Service, and HTTPRoute.
+#
+# Prerequisites:
+#   1. orders-prod DBInstance is Available on Harvester
+#   2. orders-db Service + Endpoints + Secret exist in the dataplane namespace
+#      (apply config/samples/db-access.yaml to the target namespace first)
+#
+# Apply:
+#   PGPW="<db password>"
+#   sed "s/REPLACE_WITH_DB_PASSWORD/$PGPW/" config/samples/greeter-db-openchoreo.yaml \
+#     | kubectl apply -f -
+#
+# Check:
+#   kubectl get component greeter-db-service -n default
+#   kubectl get releasebinding -n default | grep greeter-db
+#
+# Test via OpenChoreo gateway:
+#   curl http://development-default.openchoreoapis.local/greeter-db-service-http/greeter/greet?name=OpenChoreo
+#   curl http://development-default.openchoreoapis.local/greeter-db-service-http/greeter/greetings
+#
+# Cleanup:
+#   kubectl delete workload greeter-db-service-workload -n default
+#   kubectl delete component greeter-db-service -n default
+
+---
+apiVersion: openchoreo.dev/v1alpha1
+kind: Component
+metadata:
+  name: greeter-db-service
+  namespace: default
+spec:
+  autoDeploy: true
+  componentType:
+    kind: ClusterComponentType
+    name: deployment/service
+  owner:
+    projectName: default
+
+---
+apiVersion: openchoreo.dev/v1alpha1
+kind: Workload
+metadata:
+  name: greeter-db-service-workload
+  namespace: default
+spec:
+  owner:
+    componentName: greeter-db-service
+    projectName: default
+  container:
+    command:
+    - ./go-greeter
+    env:
+    - key: LOG_LEVEL
+      value: info
+    - key: PGHOST
+      value: orders-db
+    - key: PGPORT
+      value: "5432"
+    - key: PGDATABASE
+      value: orders
+    - key: PGUSER
+      value: orders_admin
+    - key: PGPASSWORD
+      value: REPLACE_WITH_DB_PASSWORD
+    image: wso2vick/greeter-db:v0.1.0
+  endpoints:
+    http:
+      port: 9090
+      type: HTTP
+      visibility:
+      - external
