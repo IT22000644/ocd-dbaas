@@ -1,0 +1,26 @@
+# API keys for the REST gateway.
+#
+# Each key in data maps an API key to a role:
+#   admin    — full access (create, delete, start, stop, list, get)
+#   operator — operational (start, stop, list, get)
+#   viewer   — read-only (list, get)
+#
+# Generate keys with: openssl rand -hex 32
+#
+# Usage:
+#   curl -H "Authorization: Bearer <api-key>" http://<gateway>/dbinstances
+#
+# IMPORTANT: Replace these sample keys before deploying to production.
+#            Do NOT commit real API keys to version control.
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dbaas-api-keys
+  namespace: dbaas-system
+type: Opaque
+stringData:
+  # Replace these with real keys: openssl rand -hex 32
+  dbaas-admin-change-me: admin
+  dbaas-operator-change-me: operator
+  dbaas-viewer-change-me: viewer

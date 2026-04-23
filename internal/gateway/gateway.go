@@ -13,6 +13,8 @@ import (
 )
 
 func RunGateway(addr string, k8sClient client.Client) error {
+	auth := newAuthMiddleware(k8sClient, "dbaas-api-keys", "dbaas-system")
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -35,10 +37,13 @@ func RunGateway(addr string, k8sClient client.Client) error {
 		handleInstanceRoute(w, r, k8sClient)
 	})
 
-	return http.ListenAndServe(addr, mux)
+	return http.ListenAndServe(addr, auth.Wrap(mux))
 }
 
 func handleListInstances(w http.ResponseWriter, r *http.Request, k8sClient client.Client) {
+	if !RequireRole(w, r, RoleAdmin, RoleOperator, RoleViewer) {
+		return
+	}
 	var instances dbaasv1.DBInstanceList
 	if err := k8sClient.List(r.Context(), &instances); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -48,6 +53,9 @@ func handleListInstances(w http.ResponseWriter, r *http.Request, k8sClient clien
 }
 
 func handleCreateInstance(w http.ResponseWriter, r *http.Request, k8sClient client.Client) {
+	if !RequireRole(w, r, RoleAdmin) {
+		return
+	}
 	defer r.Body.Close()
 
 	var instance dbaasv1.DBInstance
@@ -113,6 +121,9 @@ func handleInstanceRoute(w http.ResponseWriter, r *http.Request, k8sClient clien
 }
 
 func handleGetInstance(w http.ResponseWriter, r *http.Request, k8sClient client.Client, name string) {
+	if !RequireRole(w, r, RoleAdmin, RoleOperator, RoleViewer) {
+		return
+	}
 	var instance dbaasv1.DBInstance
 	if err := k8sClient.Get(r.Context(), types.NamespacedName{Name: name}, &instance); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -126,6 +137,9 @@ func handleGetInstance(w http.ResponseWriter, r *http.Request, k8sClient client.
 }
 
 func handleDeleteInstance(w http.ResponseWriter, r *http.Request, k8sClient client.Client, name string) {
+	if !RequireRole(w, r, RoleAdmin) {
+		return
+	}
 	instance := &dbaasv1.DBInstance{}
 	instance.Name = name
 	instance.APIVersion = dbaasv1.GroupVersion.String()
@@ -143,6 +157,9 @@ func handleDeleteInstance(w http.ResponseWriter, r *http.Request, k8sClient clie
 }
 
 func handleSetRunning(w http.ResponseWriter, r *http.Request, k8sClient client.Client, name string, running bool) {
+	if !RequireRole(w, r, RoleAdmin, RoleOperator) {
+		return
+	}
 	var instance dbaasv1.DBInstance
 	if err := k8sClient.Get(r.Context(), types.NamespacedName{Name: name}, &instance); err != nil {
 		if apierrors.IsNotFound(err) {
